@@ -38,7 +38,7 @@ Requires valid JWT access token in the Authorization header.
 ## Example Request
 
 ```bash cURL
-curl -X POST https://api.example.com/api/auth/revoke \
+curl -X POST http://localhost:5000/api/auth/revoke \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
   -d '{
