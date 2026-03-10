@@ -1,0 +1,80 @@
+{
+  "projectType": "api-service",
+  "projectName": "AuthService",
+  "projectDescription": "Production-ready JWT authentication service with refresh token rotation and comprehensive security features for ASP.NET Core",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#60a5fa",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/authentication-flow",
+              "concepts/token-rotation",
+              "concepts/security-features"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/configuration",
+              "guides/production-deployment",
+              "guides/error-handling"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Authentication",
+            "pages": [
+              "api/register",
+              "api/login",
+              "api/refresh",
+              "api/revoke",
+              "api/me"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/password-hashing",
+              "security/account-lockout",
+              "security/token-validation"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "JWT access tokens with secure refresh token rotation",
+    "PBKDF2-SHA512 password hashing with 600k iterations",
+    "Automatic account lockout after failed login attempts",
+    "Token revocation with full audit trail and IP tracking",
+    "Detection and prevention of token reuse attacks",
+    "Production-ready security implementation"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/register - Register new user",
+    "POST /api/auth/login - User login with credentials",
+    "POST /api/auth/refresh - Rotate refresh token",
+    "POST /api/auth/revoke - Revoke token (logout)",
+    "GET /api/auth/me - Get current user info"
+  ]
+}
