@@ -1,0 +1,92 @@
+---
+title: "Refresh Token"
+api: "POST /api/auth/refresh"
+description: "Obtain a new access token using a refresh token"
+---
+
+## Description
+
+Exchanges a valid refresh token for a new access token and refresh token pair. The old refresh token is automatically revoked as part of the token rotation security mechanism.
+
+The service implements automatic token rotation and detects token reuse attacks. If a revoked token is presented, all tokens in that family are revoked for security.
+
+## Authentication
+
+No authentication required (uses refresh token in request body).
+
+## Request Body
+
+<ParamField body="RefreshToken" type="string" required>
+  Valid refresh token obtained from a previous login or refresh operation.
+</ParamField>
+
+## Response
+
+<ResponseField name="AccessToken" type="string">
+  New JWT access token for authenticating subsequent requests. Typically expires in 15 minutes.
+</ResponseField>
+
+<ResponseField name="RefreshToken" type="string">
+  New refresh token to replace the old one. Typically expires in 7 days.
+</ResponseField>
+
+<ResponseField name="AccessTokenExpiry" type="datetime">
+  ISO 8601 timestamp indicating when the access token expires.
+</ResponseField>
+
+<ResponseField name="User" type="object">
+  User information object containing:
+  - `Id` (guid): Unique user identifier
+  - `Username` (string): The username
+  - `Email` (string): The user's email address
+  - `CreatedAt` (datetime): Account creation timestamp
+</ResponseField>
+
+## Status Codes
+
+- **200 OK**: Successfully refreshed tokens
+- **401 Unauthorized**: Invalid, expired, or revoked refresh token
+
+## Example Request
+
+```bash cURL
+curl -X POST https://api.example.com/api/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{
+    "RefreshToken": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
+  }'
+```
+
+## Example Response
+
+```json 200 OK
+{
+  "AccessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "RefreshToken": "z9y8x7w6v5u4t3s2r1q0p9o8n7m6l5k4",
+  "AccessTokenExpiry": "2026-03-10T16:00:00Z",
+  "User": {
+    "Id": "123e4567-e89b-12d3-a456-426614174000",
+    "Username": "johndoe",
+    "Email": "john@example.com",
+    "CreatedAt": "2026-03-10T15:30:00Z"
+  }
+}
+```
+
+```json 401 Unauthorized
+{
+  "message": "Refresh token inválido."
+}
+```
+
+```json 401 Token Expired
+{
+  "message": "Refresh token expirado."
+}
+```
+
+## Security Notes
+
+- The old refresh token is automatically revoked and cannot be reused
+- Token reuse detection: If a revoked token is presented, all descendant tokens are revoked
+- Tokens older than 30 days are automatically cleaned up

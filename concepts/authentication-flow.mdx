@@ -1,0 +1,355 @@
+---
+title: 'Authentication Flow'
+description: 'Complete authentication flow from registration to logout'
+---
+
+## Overview
+
+The AuthService implements a secure, token-based authentication flow using **JWT access tokens** and **refresh tokens**. This dual-token approach balances security with user experience, keeping access tokens short-lived while allowing seamless session renewal.
+
+## Complete Authentication Journey
+
+<Steps>
+  <Step title="Registration">
+    New users create an account by providing username, email, and password.
+    
+    **Endpoint:** `POST /api/auth/register`
+    
+    ```json
+    {
+      "username": "johndoe",
+      "email": "john@example.com",
+      "password": "SecureP@ssw0rd"
+    }
+    ```
+    
+    **What happens internally** (AuthService.cs:43-65):
+    
+    1. Check if email already exists
+    2. Hash password using PBKDF2 with 600k iterations
+    3. Create user record with default settings
+    4. Generate access token (JWT) and refresh token
+    5. Store refresh token in database with IP tracking
+    6. Return both tokens to client
+    
+    <Note>
+      The password is **immediately hashed** using PBKDF2-SHA512 before storage. The plaintext password never touches the database.
+    </Note>
+  </Step>
+
+  <Step title="Login">
+    Existing users authenticate with email and password.
+    
+    **Endpoint:** `POST /api/auth/login`
+    
+    ```json
+    {
+      "email": "john@example.com",
+      "password": "SecureP@ssw0rd"
+    }
+    ```
+    
+    **What happens internally** (AuthService.cs:67-112):
+    
+    1. Fetch user by email (case-insensitive)
+    2. Check if account is active
+    3. Check if account is locked out from failed attempts
+    4. Verify password hash using constant-time comparison
+    5. **On success:** Reset failed login counter, update last login timestamp
+    6. **On failure:** Increment failed attempts, lock account after 5 failures
+    7. Generate fresh access + refresh tokens
+    8. Return tokens to client
+    
+    <Warning>
+      After 5 failed login attempts, the account is **locked for 15 minutes** to prevent brute-force attacks (AuthService.cs:26-27).
+    </Warning>
+  </Step>
+
+  <Step title="Access Token Usage">
+    The client includes the access token in every authenticated request.
+    
+    **HTTP Header:**
+    ```http
+    Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+    ```
+    
+    **Access Token Contents** (TokenService.cs:33-42):
+    
+    - `sub`: User ID (GUID)
+    - `email`: User email address
+    - `unique_name`: Username
+    - `jti`: Unique token ID
+    - `iat`: Issued at timestamp
+    - **Expiry:** 15 minutes (configurable)
+    
+    The ASP.NET Core JWT middleware automatically validates:
+    - Signature integrity (HMAC-SHA256)
+    - Issuer and audience claims
+    - Expiration time
+    - Not-before time
+    
+    <Tip>
+      Access tokens are **stateless**—the server doesn't store them. This makes validation extremely fast and scalable.
+    </Tip>
+  </Step>
+
+  <Step title="Token Refresh">
+    When the access token expires (after 15 minutes), the client uses the refresh token to get a new one.
+    
+    **Endpoint:** `POST /api/auth/refresh`
+    
+    ```json
+    {
+      "refreshToken": "base64-encoded-random-bytes"
+    }
+    ```
+    
+    **What happens internally** (AuthService.cs:114-152):
+    
+    1. Look up refresh token in database
+    2. Verify token is not revoked or expired
+    3. **Detect reuse attacks:** If token was already used, revoke entire token family
+    4. **Rotate token:** Create new refresh token, mark old one as replaced
+    5. Generate new access token
+    6. Clean up old tokens (>30 days)
+    7. Return new token pair
+    
+    <Warning>
+      Refresh tokens are **single-use**. Attempting to reuse a token triggers a security response that invalidates all related tokens for that user.
+    </Warning>
+  </Step>
+
+  <Step title="Logout">
+    Users explicitly revoke their refresh token when logging out.
+    
+    **Endpoint:** `POST /api/auth/revoke`
+    
+    ```json
+    {
+      "refreshToken": "base64-encoded-token",
+      "reason": "User logout"
+    }
+    ```
+    
+    **What happens internally** (AuthService.cs:154-170):
+    
+    1. Verify token exists and is active
+    2. Mark token as revoked with timestamp
+    3. Record IP address and reason
+    4. Log revocation event
+    
+    <Note>
+      The access token **cannot be revoked** since it's stateless. It remains valid until expiry (15 minutes). For immediate invalidation, implement a token blacklist or reduce access token lifetime.
+    </Note>
+  </Step>
+</Steps>
+
+## Sequence Diagram
+
+```
+┌──────┐                 ┌──────────┐                 ┌──────────┐
+│Client│                 │   API    │                 │ Database │
+└──┬───┘                 └────┬─────┘                 └────┬─────┘
+   │                          │                            │
+   │ POST /auth/register      │                            │
+   ├─────────────────────────>│ Hash password (PBKDF2)     │
+   │                          ├───────────┐                │
+   │                          │           │                │
+   │                          │<──────────┘                │
+   │                          │ Save user & refresh token  │
+   │                          ├───────────────────────────>│
+   │                          │                            │
+   │ {accessToken, refreshToken}                           │
+   │<─────────────────────────┤                            │
+   │                          │                            │
+   │                          │                            │
+   │ GET /api/resource        │                            │
+   │ Authorization: Bearer... │                            │
+   ├─────────────────────────>│ Validate JWT (stateless)   │
+   │                          ├───────────┐                │
+   │                          │           │                │
+   │                          │<──────────┘                │
+   │ {data}                   │                            │
+   │<─────────────────────────┤                            │
+   │                          │                            │
+   │                          │                            │
+   │ POST /auth/refresh       │                            │
+   │ {refreshToken}           │                            │
+   ├─────────────────────────>│ Verify token in DB         │
+   │                          ├───────────────────────────>│
+   │                          │ Token valid & active       │
+   │                          │<───────────────────────────┤
+   │                          │ Rotate: revoke old, create new
+   │                          ├───────────────────────────>│
+   │                          │                            │
+   │ {new accessToken, new refreshToken}                   │
+   │<─────────────────────────┤                            │
+   │                          │                            │
+   │                          │                            │
+   │ POST /auth/revoke        │                            │
+   │ {refreshToken}           │                            │
+   ├─────────────────────────>│ Mark token as revoked      │
+   │                          ├───────────────────────────>│
+   │ {"Token revoked"}        │                            │
+   │<─────────────────────────┤                            │
+   │                          │                            │
+```
+
+## Token Lifecycle
+
+<CardGroup cols={2}>
+  <Card title="Access Token" icon="key">
+    **Lifetime:** 15 minutes (default)
+    
+    **Storage:** Client-side only (memory or secure storage)
+    
+    **Purpose:** Authorize individual API requests
+    
+    **Validation:** Stateless (signature-based)
+    
+    **Revocation:** Not possible (expires naturally)
+  </Card>
+  
+  <Card title="Refresh Token" icon="rotate">
+    **Lifetime:** 7 days (default)
+    
+    **Storage:** Database + client-side
+    
+    **Purpose:** Obtain new access tokens
+    
+    **Validation:** Stateful (database lookup)
+    
+    **Revocation:** Explicit (logout, security events)
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+The service returns specific error messages while maintaining security:
+
+<Accordion title="Generic error messages for authentication failures">
+  To prevent username enumeration attacks, login failures always return the same generic message:
+  
+  ```json
+  {
+    "status": 401,
+    "message": "Credenciales inválidas.",
+    "timestamp": "2026-03-10T14:30:00Z"
+  }
+  ```
+  
+  This applies whether:
+  - Email doesn't exist
+  - Password is wrong
+  - Account is inactive
+  
+  See AuthService.cs:72-76 and AuthService.cs:88-100.
+</Accordion>
+
+<Accordion title="Account lockout messages are specific">
+  When an account is locked, the user receives a specific message:
+  
+  ```json
+  {
+    "status": 401,
+    "message": "Cuenta bloqueada temporalmente. Intenta en 12 minuto(s).",
+    "timestamp": "2026-03-10T14:30:00Z"
+  }
+  ```
+  
+  This is acceptable because:
+  - The attacker already knows the account exists (5 successful lookups)
+  - It helps legitimate users understand why they can't log in
+  - The lockout duration deters continued attacks
+  
+  See AuthService.cs:81-86.
+</Accordion>
+
+<Accordion title="Token-related errors">
+  Refresh token errors are intentionally vague:
+  
+  - **Invalid token:** "Refresh token inválido."
+  - **Expired token:** "Refresh token expirado."
+  - **Revoked token:** "Refresh token revocado."
+  
+  These prevent attackers from probing token validity.
+</Accordion>
+
+## Best Practices for Clients
+
+<Steps>
+  <Step title="Store tokens securely">
+    **Web apps:** Use `httpOnly` cookies for refresh tokens, memory for access tokens
+    
+    **Mobile apps:** Use platform secure storage (Keychain/Keystore)
+    
+    **Never:** Store tokens in localStorage on web (XSS risk)
+  </Step>
+  
+  <Step title="Handle token refresh proactively">
+    Refresh the access token **before** it expires:
+    
+    ```javascript
+    // Refresh 1 minute before expiry
+    const refreshBuffer = 60000; // 1 minute
+    const expiresIn = tokenExpiry - Date.now() - refreshBuffer;
+    
+    setTimeout(() => refreshAccessToken(), expiresIn);
+    ```
+  </Step>
+  
+  <Step title="Implement automatic retry on 401">
+    When a request fails with 401:
+    
+    1. Try to refresh the access token
+    2. Retry the original request with new token
+    3. If refresh fails, redirect to login
+    
+    Most HTTP clients support interceptors for this pattern.
+  </Step>
+  
+  <Step title="Clear tokens on logout">
+    Always:
+    
+    1. Call `/auth/revoke` endpoint
+    2. Delete tokens from client storage
+    3. Clear any cached user data
+    4. Redirect to login page
+  </Step>
+</Steps>
+
+## Configuration
+
+Token lifetimes are configurable in `appsettings.json`:
+
+```json
+{
+  "Jwt": {
+    "AccessTokenExpiryMinutes": 15,
+    "RefreshTokenExpiryDays": 7,
+    "SecretKey": "your-secret-key-min-32-chars",
+    "Issuer": "AuthService",
+    "Audience": "AuthServiceClients"
+  }
+}
+```
+
+<Warning>
+  The `SecretKey` must be at least 256 bits (32 characters) for HMAC-SHA256. Use a cryptographically random value in production.
+</Warning>
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Token Rotation" icon="arrows-rotate" href="./token-rotation">
+    Learn how refresh token rotation prevents token reuse attacks
+  </Card>
+  
+  <Card title="Security Features" icon="shield-halved" href="./security-features">
+    Explore all security mechanisms in the service
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="../api-reference/authentication">
+    Complete endpoint documentation
+  </Card>
+</CardGroup>

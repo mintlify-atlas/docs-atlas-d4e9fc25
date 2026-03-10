@@ -1,0 +1,437 @@
+---
+title: Configuration
+description: Complete guide to configuring the AuthService
+---
+
+## Overview
+
+AuthService uses ASP.NET Core's configuration system with `appsettings.json` files. Configuration can be customized per environment using `appsettings.{Environment}.json` files.
+
+## Configuration Structure
+
+The main configuration file is located at the project root:
+
+```json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Data Source=authservice.db"
+  },
+  "Jwt": {
+    "SecretKey": "CAMBIA-ESTO-EN-PRODUCCION-usa-un-valor-largo-y-aleatorio-min32chars",
+    "Issuer": "AuthService",
+    "Audience": "AuthService.Clients",
+    "AccessTokenExpiryMinutes": "15",
+    "RefreshTokenExpiryDays": "7"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+```
+
+## Connection Strings
+
+### Development (SQLite)
+
+By default, the service uses SQLite for development:
+
+```json
+"ConnectionStrings": {
+  "DefaultConnection": "Data Source=authservice.db"
+}
+```
+
+The connection string is read in `Program.cs:13-15`:
+
+```csharp
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection")
+        ?? "Data Source=authservice.db"));
+```
+
+### Production Databases
+
+<Tabs>
+  <Tab title="PostgreSQL">
+    ```json
+    "ConnectionStrings": {
+      "DefaultConnection": "Host=localhost;Database=authservice;Username=postgres;Password=yourpassword"
+    }
+    ```
+    
+    Update your `Program.cs` to use PostgreSQL:
+    
+    ```csharp
+    builder.Services.AddDbContext<AppDbContext>(options =>
+        options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+    ```
+  </Tab>
+  
+  <Tab title="SQL Server">
+    ```json
+    "ConnectionStrings": {
+      "DefaultConnection": "Server=localhost;Database=AuthService;Trusted_Connection=True;TrustServerCertificate=True"
+    }
+    ```
+    
+    Update your `Program.cs` to use SQL Server:
+    
+    ```csharp
+    builder.Services.AddDbContext<AppDbContext>(options =>
+        options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  Never commit database credentials to source control. Use environment variables or secure vaults in production.
+</Warning>
+
+## JWT Settings
+
+JWT configuration is critical for security. All settings are under the `Jwt` section.
+
+### SecretKey
+
+The secret key used to sign JWT tokens. **This is the most critical security setting.**
+
+```json
+"Jwt": {
+  "SecretKey": "CAMBIA-ESTO-EN-PRODUCCION-usa-un-valor-largo-y-aleatorio-min32chars"
+}
+```
+
+<Warning>
+  - **MUST** be changed in production
+  - Minimum 32 characters (256 bits recommended)
+  - Use cryptographically random values
+  - Store in environment variables or secure vaults, never in code
+</Warning>
+
+<Tip>
+  Generate a secure key with:
+  ```bash
+  openssl rand -base64 64
+  ```
+</Tip>
+
+The secret key is used in `Program.cs:18-20` and `TokenService.cs:29-30`:
+
+```csharp
+var jwtSection = builder.Configuration.GetSection("Jwt");
+var secretKey = jwtSection["SecretKey"] ?? throw new InvalidOperationException("JWT SecretKey not configured");
+var key = Encoding.UTF8.GetBytes(secretKey);
+```
+
+### Issuer and Audience
+
+These values identify your authentication service and intended clients:
+
+```json
+"Jwt": {
+  "Issuer": "AuthService",
+  "Audience": "AuthService.Clients"
+}
+```
+
+- **Issuer**: Identifies who created the token (your auth service)
+- **Audience**: Identifies who the token is intended for (your API clients)
+
+Both are validated in `Program.cs:33-36`:
+
+```csharp
+ValidateIssuer = true,
+ValidIssuer = jwtSection["Issuer"],
+ValidateAudience = true,
+ValidAudience = jwtSection["Audience"],
+```
+
+<Note>
+  In multi-service architectures, use distinct issuer/audience values to prevent token reuse across services.
+</Note>
+
+### Token Expiry Times
+
+#### Access Token Expiry
+
+```json
+"AccessTokenExpiryMinutes": "15"
+```
+
+Access tokens are short-lived JWT tokens. Default is 15 minutes.
+
+- **Shorter times**: More secure, but require more frequent refreshes
+- **Longer times**: Better UX, but larger attack window if compromised
+
+Used in `TokenService.cs:44` to set token expiration:
+
+```csharp
+var expiryMinutes = int.Parse(jwtSection["AccessTokenExpiryMinutes"] ?? "15");
+var token = new JwtSecurityToken(
+    // ...
+    expires: DateTime.UtcNow.AddMinutes(expiryMinutes),
+    // ...
+);
+```
+
+#### Refresh Token Expiry
+
+```json
+"RefreshTokenExpiryDays": "7"
+```
+
+Refresh tokens are long-lived tokens stored in the database. Default is 7 days.
+
+- Users can obtain new access tokens without re-authenticating while refresh token is valid
+- Longer expiry means less frequent logins required
+
+Used in `AuthService.cs:214` to create refresh tokens:
+
+```csharp
+var expiryDays = int.Parse(_config["Jwt:RefreshTokenExpiryDays"] ?? "7");
+return new RefreshToken
+{
+    Token = _tokenService.GenerateRefreshToken(),
+    ExpiresAt = DateTime.UtcNow.AddDays(expiryDays),
+    CreatedByIp = ipAddress
+};
+```
+
+<Tip>
+  Common configurations:
+  - **High security**: AccessToken=5min, RefreshToken=1day
+  - **Balanced**: AccessToken=15min, RefreshToken=7days (default)
+  - **User-friendly**: AccessToken=60min, RefreshToken=30days
+</Tip>
+
+### Clock Skew
+
+The service disables clock skew tolerance in `Program.cs:39`:
+
+```csharp
+ClockSkew = TimeSpan.Zero
+```
+
+This means expired tokens are rejected immediately without grace period.
+
+<Accordion title="Why disable clock skew?">
+  By default, ASP.NET Core allows a 5-minute tolerance for token expiration to account for clock differences between servers. This service disables it because:
+  
+  - Refresh token mechanism makes strict expiry acceptable
+  - Eliminates a 5-minute attack window for stolen tokens
+  - Modern servers use NTP for clock synchronization
+  
+  If you experience issues with distributed systems, you can set:
+  ```csharp
+  ClockSkew = TimeSpan.FromMinutes(5)
+  ```
+</Accordion>
+
+## Logging Configuration
+
+### Log Levels
+
+Control verbosity of different components:
+
+```json
+"Logging": {
+  "LogLevel": {
+    "Default": "Information",
+    "Microsoft.AspNetCore": "Warning",
+    "Microsoft.EntityFrameworkCore": "Warning"
+  }
+}
+```
+
+**Log Levels** (from most to least verbose):
+- `Trace`: Very detailed, for debugging only
+- `Debug`: Detailed information for development
+- `Information`: General application flow
+- `Warning`: Unexpected but handled events
+- `Error`: Errors and exceptions
+- `Critical`: Critical failures
+
+### Development Overrides
+
+Create `appsettings.Development.json` to override settings in development:
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Debug",
+      "Microsoft.AspNetCore": "Information",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Information"
+    }
+  }
+}
+```
+
+This shows SQL queries in development for debugging.
+
+<Note>
+  The `appsettings.{Environment}.json` file overrides values from `appsettings.json`. The environment is determined by the `ASPNETCORE_ENVIRONMENT` variable.
+</Note>
+
+## Environment-Specific Configuration
+
+### Setting the Environment
+
+<Steps>
+  <Step title="Set environment variable">
+    ```bash
+    export ASPNETCORE_ENVIRONMENT=Production
+    ```
+    
+    Or in Windows:
+    ```bash
+    set ASPNETCORE_ENVIRONMENT=Production
+    ```
+  </Step>
+  
+  <Step title="Create environment-specific config">
+    Create `appsettings.Production.json`:
+    ```json
+    {
+      "Jwt": {
+        "SecretKey": "${JWT_SECRET_KEY}",
+        "AccessTokenExpiryMinutes": "15",
+        "RefreshTokenExpiryDays": "7"
+      },
+      "Logging": {
+        "LogLevel": {
+          "Default": "Warning",
+          "Microsoft.AspNetCore": "Warning"
+        }
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Use environment variables">
+    Override configuration with environment variables:
+    ```bash
+    export ConnectionStrings__DefaultConnection="Server=prod-db;Database=AuthService;..."
+    export Jwt__SecretKey="your-secure-production-key-here"
+    ```
+    
+    <Note>
+      ASP.NET Core uses double underscores (`__`) to represent nested configuration levels.
+    </Note>
+  </Step>
+</Steps>
+
+### Configuration Precedence
+
+Configuration sources are applied in this order (last wins):
+
+1. `appsettings.json`
+2. `appsettings.{Environment}.json`
+3. User secrets (Development only)
+4. Environment variables
+5. Command-line arguments
+
+## Security Best Practices
+
+<Warning>
+  **NEVER commit secrets to source control**
+  
+  Add to `.gitignore`:
+  ```
+  appsettings.Production.json
+  appsettings.*.local.json
+  *.db
+  ```
+</Warning>
+
+<Steps>
+  <Step title="Use User Secrets in Development">
+    ```bash
+    dotnet user-secrets init
+    dotnet user-secrets set "Jwt:SecretKey" "your-dev-secret-key"
+    ```
+  </Step>
+  
+  <Step title="Use Environment Variables in Production">
+    Store sensitive values in:
+    - Azure Key Vault
+    - AWS Secrets Manager
+    - Kubernetes Secrets
+    - Environment variables
+  </Step>
+  
+  <Step title="Rotate Keys Regularly">
+    Implement a key rotation strategy for `SecretKey` (see [Production Deployment](/guides/production-deployment)).
+  </Step>
+</Steps>
+
+## Complete Configuration Example
+
+<CodeGroup>
+```json appsettings.json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "Data Source=authservice.db"
+  },
+  "Jwt": {
+    "SecretKey": "dev-key-only-not-for-production",
+    "Issuer": "AuthService",
+    "Audience": "AuthService.Clients",
+    "AccessTokenExpiryMinutes": "15",
+    "RefreshTokenExpiryDays": "7"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+```
+
+```json appsettings.Development.json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Debug",
+      "Microsoft.AspNetCore": "Information",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Information"
+    }
+  }
+}
+```
+
+```json appsettings.Production.json
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "${DATABASE_CONNECTION_STRING}"
+  },
+  "Jwt": {
+    "SecretKey": "${JWT_SECRET_KEY}",
+    "Issuer": "AuthService",
+    "Audience": "AuthService.Clients",
+    "AccessTokenExpiryMinutes": "15",
+    "RefreshTokenExpiryDays": "7"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Warning",
+      "Microsoft.AspNetCore": "Error"
+    }
+  },
+  "AllowedHosts": "yourdomain.com"
+}
+```
+</CodeGroup>
+
+## Related Topics
+
+- [Production Deployment](/guides/production-deployment) - Securing configuration for production
+- [API Reference](/api/register) - How configuration affects API behavior

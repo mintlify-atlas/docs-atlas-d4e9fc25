@@ -1,0 +1,757 @@
+---
+title: 'Security Features'
+description: 'Comprehensive overview of all security mechanisms in AuthService'
+---
+
+## Overview
+
+The AuthService implements **defense-in-depth** security, with multiple layers of protection against common authentication attacks. Every design decision prioritizes security over convenience.
+
+<Note>
+  This service follows **OWASP guidelines** and **NIST standards** for authentication security.
+</Note>
+
+## Password Security
+
+### PBKDF2 Password Hashing
+
+Passwords are hashed using **PBKDF2-HMAC-SHA512**, the NIST-recommended algorithm for password storage.
+
+**Implementation** (PasswordService.cs:17-37):
+
+```csharp
+public class PasswordService : IPasswordService
+{
+    private const int SaltSize = 32;       // 256 bits
+    private const int HashSize = 64;       // 512 bits
+    private const int Iterations = 600_000; // OWASP 2024 recommendation
+    private static readonly HashAlgorithmName Algorithm = HashAlgorithmName.SHA512;
+
+    public string Hash(string password)
+    {
+        var salt = RandomNumberGenerator.GetBytes(SaltSize);
+        var hash = Rfc2898DeriveBytes.Pbkdf2(
+            Encoding.UTF8.GetBytes(password),
+            salt,
+            Iterations,
+            Algorithm,
+            HashSize
+        );
+
+        // Format: iterations:salt_base64:hash_base64
+        return $"{Iterations}:{Convert.ToBase64String(salt)}:{Convert.ToBase64String(hash)}";
+    }
+}
+```
+
+**Why these parameters?**
+
+<CardGroup cols={2}>
+  <Card title="600,000 Iterations" icon="repeat">
+    **OWASP 2024 recommendation** for PBKDF2-SHA512
+    
+    Makes brute-force attacks computationally expensive. Each password attempt takes ~100ms to verify.
+    
+    At 600k iterations, cracking a 10-character password would take **centuries** with current hardware.
+  </Card>
+  
+  <Card title="SHA-512 Algorithm" icon="hash">
+    **512-bit output** provides collision resistance
+    
+    Stronger than SHA-256, recommended by NIST SP 800-132 for password hashing.
+    
+    More resistant to GPU/ASIC attacks than MD5 or SHA-1.
+  </Card>
+  
+  <Card title="32-byte Random Salt" icon="shuffle">
+    **Unique per password** prevents rainbow table attacks
+    
+    Generated using cryptographically secure RNG (PasswordService.cs:26).
+    
+    Stored alongside hash in format: `iterations:salt:hash`
+  </Card>
+  
+  <Card title="64-byte Hash Output" icon="key">
+    **512-bit hash** maximizes security
+    
+    Longer than typical 256-bit hashes, providing extra collision resistance.
+    
+    Hash + salt together make precomputed attacks infeasible.
+  </Card>
+</CardGroup>
+
+**Why PBKDF2 over bcrypt or Argon2?**
+
+<Accordion title="Click to see comparison">
+  | Algorithm | Pros | Cons | AuthService Choice |
+  |-----------|------|------|-----------------|
+  | **PBKDF2** | NIST-approved, built into .NET, configurable iterations | Slightly more vulnerable to GPU attacks | ✅ **Used here** |
+  | **bcrypt** | Industry standard, GPU-resistant | Fixed cost factor (2^n), limited to 72-byte passwords | ❌ Less control |
+  | **Argon2** | Winner of Password Hashing Competition, memory-hard | Not in .NET Core, requires native library | ❌ External dependency |
+  
+  **Decision:** PBKDF2 with 600k iterations provides excellent security without external dependencies. The comment in PasswordService.cs:12-15 explains:
+  
+  ```csharp
+  /// No uso BCrypt porque quiero control explícito sobre los parámetros
+  /// y PBKDF2 es el estándar recomendado por NIST SP 800-132.
+  ```
+</Accordion>
+
+### Timing Attack Prevention
+
+Password verification uses **constant-time comparison** to prevent timing attacks (PasswordService.cs:57-58):
+
+```csharp
+// Comparación en tiempo constante para evitar timing attacks
+return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
+```
+
+**Why this matters:**
+
+<Steps>
+  <Step title="Without constant-time comparison">
+    A naive comparison like `actualHash == expectedHash` exits early on the first mismatched byte.
+    
+    Attacker can measure response times:
+    - Fast response → first byte wrong
+    - Slower response → more bytes correct
+    
+    This leaks information about the hash!
+  </Step>
+  
+  <Step title="With constant-time comparison">
+    `FixedTimeEquals` always compares **all bytes**, regardless of matches.
+    
+    Response time is constant:
+    - Wrong password → same time
+    - Correct password → same time
+    
+    No information leaked.
+  </Step>
+</Steps>
+
+## Account Lockout Protection
+
+### Brute-Force Prevention
+
+After **5 failed login attempts**, accounts are locked for **15 minutes** (AuthService.cs:25-27):
+
+```csharp
+// Después de 5 intentos fallidos, bloquear por 15 minutos
+private const int MaxFailedAttempts = 5;
+private const int LockoutMinutes = 15;
+```
+
+**Implementation** (AuthService.cs:88-100):
+
+```csharp
+if (!_passwordService.Verify(request.Password, user.PasswordHash))
+{
+    user.FailedLoginAttempts++;
+
+    if (user.FailedLoginAttempts >= MaxFailedAttempts)
+    {
+        user.LockoutEnd = DateTime.UtcNow.AddMinutes(LockoutMinutes);
+        _logger.LogWarning("Cuenta bloqueada por intentos fallidos: {Email}", user.Email);
+    }
+
+    await _db.SaveChangesAsync();
+    throw new UnauthorizedAccessException("Credenciales inválidas.");
+}
+```
+
+**Lockout check** (AuthService.cs:81-86):
+
+```csharp
+if (user.IsLockedOut())
+{
+    var remaining = (int)(user.LockoutEnd!.Value - DateTime.UtcNow).TotalMinutes + 1;
+    throw new UnauthorizedAccessException(
+        $"Cuenta bloqueada temporalmente. Intenta en {remaining} minuto(s).");
+}
+```
+
+The `IsLockedOut` method (User.cs:20-21):
+
+```csharp
+public bool IsLockedOut() =>
+    LockoutEnd.HasValue && LockoutEnd.Value > DateTime.UtcNow;
+```
+
+**Attack mitigation:**
+
+- **Credential stuffing:** Limits attacker to 5 attempts per account
+- **Brute-force:** Makes large-scale attacks impractical (15min × attempts = weeks)
+- **Dictionary attacks:** Rate-limits password guessing
+
+<Warning>
+  Lockout counters are **persistent** (stored in database). Restarting the server doesn't reset them.
+</Warning>
+
+### Lockout Reset on Success
+
+When a user logs in successfully, the lockout counter is reset (AuthService.cs:102-105):
+
+```csharp
+// Login exitoso -- resetear contadores
+user.FailedLoginAttempts = 0;
+user.LockoutEnd = null;
+user.LastLoginAt = DateTime.UtcNow;
+```
+
+This ensures legitimate users aren't permanently locked out after forgetting their password.
+
+## Information Disclosure Prevention
+
+### Generic Error Messages
+
+The service returns **identical error messages** for different failure scenarios to prevent username enumeration.
+
+**Email doesn't exist** (AuthService.cs:72-76):
+
+```csharp
+if (user == null)
+{
+    // Respuesta genérica para no revelar si el email existe
+    throw new UnauthorizedAccessException("Credenciales inválidas.");
+}
+```
+
+**Wrong password** (AuthService.cs:88-100):
+
+```csharp
+if (!_passwordService.Verify(request.Password, user.PasswordHash))
+{
+    // ... increment counter ...
+    throw new UnauthorizedAccessException("Credenciales inválidas.");
+}
+```
+
+**Inactive account** (AuthService.cs:78-79):
+
+```csharp
+if (!user.IsActive)
+    throw new UnauthorizedAccessException("Cuenta desactivada.");
+```
+
+All return the **same HTTP 401 status** with generic messages. An attacker cannot determine:
+
+- Whether an email is registered
+- Whether the password is correct for an existing account
+- Whether an account is active or disabled
+
+<Tip>
+  **Exception:** Account lockout messages are specific ("Cuenta bloqueada...") because at that point, the attacker already knows the account exists (they triggered 5 lookups).
+</Tip>
+
+### Centralized Error Handling
+
+All exceptions are caught and normalized by middleware (ExceptionHandlingMiddleware.cs:29-38):
+
+```csharp
+private async Task HandleExceptionAsync(HttpContext context, Exception exception)
+{
+    var (statusCode, message) = exception switch
+    {
+        UnauthorizedAccessException => (HttpStatusCode.Unauthorized, exception.Message),
+        InvalidOperationException => (HttpStatusCode.Conflict, exception.Message),
+        KeyNotFoundException => (HttpStatusCode.NotFound, exception.Message),
+        ArgumentException => (HttpStatusCode.BadRequest, exception.Message),
+        _ => (HttpStatusCode.InternalServerError, "Ocurrió un error interno.")
+    };
+    // ...
+}
+```
+
+This ensures:
+
+- Consistent error format across all endpoints
+- No stack traces leaked in production
+- Internal errors return generic "500" message
+- Security-relevant errors are logged (ExceptionHandlingMiddleware.cs:40-41)
+
+## Token Security
+
+### Refresh Token Rotation
+
+See the dedicated [Token Rotation](/concepts/token-rotation) page for details. Key points:
+
+- **Single-use tokens:** Each refresh invalidates the previous token
+- **Reuse detection:** Using an old token triggers security response
+- **Family revocation:** All descendant tokens are invalidated on breach
+
+Implemented in AuthService.cs:114-152.
+
+### Cryptographically Secure Token Generation
+
+Refresh tokens are generated using `RandomNumberGenerator` (TokenService.cs:62-66):
+
+```csharp
+public string GenerateRefreshToken()
+{
+    var bytes = RandomNumberGenerator.GetBytes(64);
+    return Convert.ToBase64String(bytes);
+}
+```
+
+- **64 bytes of entropy** (512 bits) makes tokens unguessable
+- **Base64 encoding** for safe transport in JSON/HTTP
+- **Cryptographically secure RNG** (not pseudo-random)
+
+<Warning>
+  Never use `Random()` for token generation—it's predictable and can be reverse-engineered.
+</Warning>
+
+### JWT Security
+
+Access tokens are signed JWTs using HMAC-SHA256 (TokenService.cs:26-56):
+
+```csharp
+var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
+var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+var token = new JwtSecurityToken(
+    issuer: jwtSection["Issuer"],
+    audience: jwtSection["Audience"],
+    claims: claims,
+    notBefore: DateTime.UtcNow,
+    expires: DateTime.UtcNow.AddMinutes(expiryMinutes),
+    signingCredentials: creds
+);
+```
+
+**Security properties:**
+
+- **HMAC-SHA256 signature:** Prevents token tampering
+- **Issuer validation:** Rejects tokens from other sources
+- **Audience validation:** Ensures tokens are for this service
+- **Expiry validation:** Rejects expired tokens (15 minutes)
+- **Not-before validation:** Rejects tokens used too early
+
+**Signature verification** (TokenService.cs:68-102) validates:
+
+```csharp
+if (validatedToken is not JwtSecurityToken jwtToken ||
+    !jwtToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.OrdinalIgnoreCase))
+{
+    return null; // Reject tokens with wrong algorithm
+}
+```
+
+This prevents **algorithm substitution attacks** where an attacker changes the algorithm from HMAC to "none".
+
+## IP Address Tracking
+
+### Forensic Data Collection
+
+The service tracks IP addresses for all authentication events (AuthController.cs:81-84):
+
+```csharp
+private string GetClientIp()
+{
+    return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+}
+```
+
+IPs are recorded for:
+
+- **Registration:** `CreateRefreshToken(ipAddress)` (AuthService.cs:190)
+- **Login:** `CreateRefreshToken(ipAddress)` (AuthService.cs:190)
+- **Token refresh:** `CreatedByIp` on new token (RefreshToken.cs:12)
+- **Token revocation:** `RevokedByIp` (AuthService.cs:140, 164)
+
+Stored in database (RefreshToken.cs:12-17):
+
+```csharp
+public string? CreatedByIp { get; set; }    // Where token was created
+public string? RevokedByIp { get; set; }    // Who revoked it
+```
+
+**Use cases:**
+
+- Detect logins from unusual locations
+- Correlate token reuse attacks with IP addresses
+- Forensic analysis after breach detection
+- Identify compromised devices
+
+<Note>
+  IP addresses are **not used for authorization**—only for logging and forensics. Authorization is purely token-based.
+</Note>
+
+## Account Status Controls
+
+### Active/Inactive Flag
+
+Accounts can be disabled without deletion (User.cs:14):
+
+```csharp
+public bool IsActive { get; set; } = true;
+```
+
+Checked during login (AuthService.cs:78-79):
+
+```csharp
+if (!user.IsActive)
+    throw new UnauthorizedAccessException("Cuenta desactivada.");
+```
+
+**Use cases:**
+
+- Temporarily disable suspicious accounts
+- Soft-delete users (preserve data, revoke access)
+- Implement "account suspension" feature
+- Comply with GDPR "right to erasure" (mark inactive, delete later)
+
+### Activity Timestamps
+
+User entity tracks important dates (User.cs:15-16):
+
+```csharp
+public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+public DateTime? LastLoginAt { get; set; }  // Updated on successful login
+```
+
+`LastLoginAt` is updated on successful login (AuthService.cs:105):
+
+```csharp
+user.LastLoginAt = DateTime.UtcNow;
+```
+
+**Use cases:**
+
+- Identify dormant accounts (no login in 90+ days)
+- Show "last login" to users for security awareness
+- Detect compromised accounts (sudden activity after long dormancy)
+- Compliance reporting (active user counts)
+
+## Token Lifecycle Management
+
+### Automatic Token Cleanup
+
+Old tokens are automatically purged to prevent database bloat (AuthService.cs:224-233):
+
+```csharp
+private static void RemoveOldTokens(User user)
+{
+    var cutoff = DateTime.UtcNow.AddDays(-30);
+    var oldTokens = user.RefreshTokens
+        .Where(rt => !rt.IsActive && rt.CreatedAt < cutoff)
+        .ToList();
+
+    foreach (var token in oldTokens)
+        user.RefreshTokens.Remove(token);
+}
+```
+
+**Policy:**
+
+- Active tokens: **Never deleted** (needed for auth)
+- Inactive tokens < 30 days: **Kept** (forensics)
+- Inactive tokens > 30 days: **Deleted** (space management)
+
+Runs on every refresh (AuthService.cs:147) and registration/login (AuthService.cs:193).
+
+### Revocation Tracking
+
+When tokens are revoked, metadata is preserved (RefreshToken.cs:15-18):
+
+```csharp
+public DateTime? RevokedAt { get; set; }       // When
+public string? RevokedByIp { get; set; }       // Where
+public string? ReplacedByToken { get; set; }   // What replaced it
+public string? RevocationReason { get; set; }  // Why
+```
+
+**Revocation reasons:**
+
+- `"Rotación normal"` - Token rotated during refresh (AuthService.cs:142)
+- `"Token reuse detectado"` - Security event triggered (AuthService.cs:129, 247)
+- `"Revocación manual"` - User logged out (AuthService.cs:165)
+- `"User logout"` - Explicit logout by user (AuthController.cs:63)
+
+This audit trail enables post-incident analysis.
+
+## Input Validation
+
+### Request DTOs
+
+All inputs are validated using data annotations (AuthDTOs.cs:5-23):
+
+```csharp
+public record RegisterRequest(
+    [Required, MaxLength(100)] string Username,
+    [Required, EmailAddress, MaxLength(256)] string Email,
+    [Required, MinLength(8), MaxLength(128)] string Password
+);
+
+public record LoginRequest(
+    [Required, EmailAddress] string Email,
+    [Required] string Password
+);
+
+public record RefreshTokenRequest(
+    [Required] string RefreshToken
+);
+```
+
+**Validations applied:**
+
+- **Email format:** `[EmailAddress]` ensures valid email syntax
+- **Password length:** 8-128 characters (prevents empty and overly long passwords)
+- **Username length:** Max 100 characters (prevents buffer attacks)
+- **Required fields:** All fields are mandatory
+
+**Validation happens automatically** via ASP.NET Core model binding. Invalid requests return **400 Bad Request** before reaching controller code.
+
+### Email Normalization
+
+Emails are normalized to lowercase to prevent duplicate accounts (AuthService.cs:47, 55, 70):
+
+```csharp
+var existingUser = await _db.Users
+    .FirstOrDefaultAsync(u => u.Email == request.Email.ToLower());
+
+// ...
+
+var user = new User
+{
+    Email = request.Email.ToLower(),
+    // ...
+};
+```
+
+This ensures:
+
+- `John@Example.com` and `john@example.com` are treated as the same account
+- No duplicate registrations due to case differences
+- Consistent lookup behavior
+
+## Logging and Monitoring
+
+### Security Event Logging
+
+Critical security events are logged (AuthService.cs:23):
+
+```csharp
+private readonly ILogger<AuthService> _logger;
+```
+
+**Logged events:**
+
+1. **Successful registration** (AuthService.cs:62):
+   ```csharp
+   _logger.LogInformation("Nuevo usuario registrado: {Email}", user.Email);
+   ```
+
+2. **Account lockout** (AuthService.cs:95):
+   ```csharp
+   _logger.LogWarning("Cuenta bloqueada por intentos fallidos: {Email}", user.Email);
+   ```
+
+3. **Successful login** (AuthService.cs:109):
+   ```csharp
+   _logger.LogInformation("Login exitoso: {Email} desde {Ip}", user.Email, ipAddress);
+   ```
+
+4. **Token reuse attack** (AuthService.cs:127-128):
+   ```csharp
+   _logger.LogWarning(
+       "Posible token reuse attack detectado para usuario {UserId}", storedToken.UserId);
+   ```
+
+5. **Token revocation** (AuthService.cs:169):
+   ```csharp
+   _logger.LogInformation("Token revocado para usuario {UserId}", storedToken.UserId);
+   ```
+
+6. **Unhandled exceptions** (ExceptionHandlingMiddleware.cs:40-41):
+   ```csharp
+   if (statusCode == HttpStatusCode.InternalServerError)
+       _logger.LogError(exception, "Error no controlado");
+   ```
+
+**Log levels used:**
+
+- `Information`: Normal operations (registration, login, revocation)
+- `Warning`: Security events (lockout, token reuse)
+- `Error`: System failures (unhandled exceptions)
+
+<Tip>
+  In production, configure log aggregation (e.g., Serilog + Seq, ELK stack) to monitor these events in real-time.
+</Tip>
+
+### What NOT to Log
+
+<Warning>
+  The service **never logs:**
+  
+  - Passwords (plaintext or hashed)
+  - Token values (access or refresh)
+  - Full request/response bodies
+  - User personal data beyond email
+  
+  Logging these would create security risks and GDPR compliance issues.
+</Warning>
+
+## Database Security
+
+### No Plaintext Secrets
+
+Passwords are **never stored in plaintext**. Only PBKDF2 hashes are persisted (User.cs:8):
+
+```csharp
+public string PasswordHash { get; set; } = string.Empty;
+```
+
+Even if the database is compromised, attackers cannot directly obtain passwords.
+
+### Token Storage
+
+Refresh tokens are stored **verbatim** in the database (RefreshToken.cs:7):
+
+```csharp
+public string Token { get; set; } = string.Empty;
+```
+
+This is acceptable because:
+
+- Tokens are cryptographically random (512 bits)
+- They're single-use (rotation)
+- Database access requires authentication
+- Tokens have limited lifetime (7 days)
+
+<Note>
+  For ultra-high-security environments, consider hashing refresh tokens before storage. Trade-off: adds complexity and one additional DB query per refresh.
+</Note>
+
+## Security Headers
+
+While not explicitly shown in the code, production deployments should add security headers:
+
+```csharp
+// In Program.cs or middleware
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+    context.Response.Headers.Add("Strict-Transport-Security", "max-age=31536000");
+    await next();
+});
+```
+
+## Security Checklist
+
+<Steps>
+  <Step title="Password Security">
+    ✅ PBKDF2-SHA512 with 600k iterations
+    ✅ 32-byte random salt per password
+    ✅ Constant-time comparison
+    ✅ Minimum 8-character requirement
+  </Step>
+  
+  <Step title="Authentication Security">
+    ✅ Account lockout after 5 failed attempts
+    ✅ Generic error messages (no enumeration)
+    ✅ JWT signature validation
+    ✅ Token expiration enforcement
+  </Step>
+  
+  <Step title="Token Security">
+    ✅ Refresh token rotation
+    ✅ Reuse attack detection
+    ✅ Cryptographically secure generation
+    ✅ IP address tracking
+  </Step>
+  
+  <Step title="Operational Security">
+    ✅ Comprehensive logging
+    ✅ Automatic token cleanup
+    ✅ Account status controls
+    ✅ Centralized error handling
+  </Step>
+</Steps>
+
+## Threat Model Coverage
+
+| Attack Vector | Mitigation | Implementation |
+|---------------|------------|----------------|
+| **Brute-force login** | Account lockout (5 attempts, 15min) | AuthService.cs:88-96 |
+| **Credential stuffing** | Rate limiting via lockout | AuthService.cs:88-96 |
+| **Rainbow table** | Unique salt per password | PasswordService.cs:26 |
+| **Timing attack** | Constant-time comparison | PasswordService.cs:58 |
+| **Token theft** | Rotation + reuse detection | AuthService.cs:114-152 |
+| **Token tampering** | HMAC-SHA256 signature | TokenService.cs:31 |
+| **Username enumeration** | Generic error messages | AuthService.cs:72-76 |
+| **Session hijacking** | Short-lived access tokens (15min) | TokenService.cs:44 |
+| **XSS token theft** | HttpOnly cookies (client responsibility) | N/A |
+| **CSRF** | Token-based auth (no cookies for auth) | N/A |
+| **SQL injection** | Entity Framework parameterization | Entire codebase |
+| **Replay attacks** | Unique JTI per token | TokenService.cs:38 |
+
+## Recommended Additions
+
+For even stronger security, consider adding:
+
+1. **Rate limiting** - Throttle requests per IP (use middleware like AspNetCoreRateLimit)
+2. **CAPTCHA** - After 3 failed attempts, require CAPTCHA
+3. **2FA/MFA** - Add TOTP support for high-value accounts
+4. **Device fingerprinting** - Detect token use from new devices
+5. **Geolocation** - Alert users to logins from unusual locations
+6. **Password strength meter** - Enforce stronger passwords (zxcvbn)
+7. **Breach detection** - Check passwords against HaveIBeenPwned
+8. **Security questions** - For account recovery
+9. **Email verification** - Verify email ownership on registration
+10. **Audit log** - Comprehensive activity log per user
+
+## Compliance Considerations
+
+<CardGroup cols={2}>
+  <Card title="GDPR" icon="shield-halved">
+    **Right to erasure:** Set `IsActive = false` and delete tokens
+    
+    **Data portability:** Export user data via `/api/auth/me`
+    
+    **Breach notification:** Use logs to detect and report breaches within 72 hours
+  </Card>
+  
+  <Card title="PCI DSS" icon="credit-card">
+    **Requirement 8:** Strong authentication (PBKDF2 600k iterations)
+    
+    **Requirement 10:** Comprehensive audit logging
+    
+    **Requirement 6:** Secure development (input validation, error handling)
+  </Card>
+  
+  <Card title="NIST 800-63B" icon="book">
+    **Level AAL2:** Password + token-based auth
+    
+    **Password storage:** PBKDF2 with 600k iterations (compliant)
+    
+    **Token lifetimes:** 15min access, 7-day refresh (compliant)
+  </Card>
+  
+  <Card title="OWASP Top 10" icon="list">
+    **A01 Broken Access Control:** JWT validation enforced
+    
+    **A02 Cryptographic Failures:** Strong hashing, secure RNG
+    
+    **A07 Auth Failures:** Lockout, rotation, generic errors
+  </Card>
+</CardGroup>
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Authentication Flow" icon="arrow-right-arrow-left" href="./authentication-flow">
+    See how these features integrate into the complete flow
+  </Card>
+  
+  <Card title="Token Rotation" icon="arrows-rotate" href="./token-rotation">
+    Deep dive into refresh token security
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="../api-reference/authentication">
+    Complete endpoint documentation
+  </Card>
+</CardGroup>

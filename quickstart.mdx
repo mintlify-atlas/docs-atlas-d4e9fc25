@@ -1,80 +1,417 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get AuthService running in 5 minutes and make your first authenticated request
 ---
 
-## Get started in three steps
+This guide will take you from zero to making authenticated API requests in under 5 minutes. You'll register a user, log in, and access a protected endpoint.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+Before you begin, make sure you have:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+- **.NET 8 SDK** installed ([download here](https://dotnet.microsoft.com/download/dotnet/8.0))
+- **Git** for cloning the repository
+- A terminal or command prompt
+- Optional: **curl** or **Postman** for testing (examples use curl)
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Verify your .NET installation by running `dotnet --version`. You should see version 8.0.x or higher.
 </Note>
+
+## Step-by-Step Guide
+
+<Steps>
+  <Step title="Clone and run the service">
+    Clone the repository and start the service:
+
+    ```bash
+    git clone https://github.com/David-Andino/auth-service-dotnet.git
+    cd auth-service-dotnet/AuthService
+    dotnet run
+    ```
+
+    You should see output indicating the service is running:
+
+    ```
+    info: Microsoft.Hosting.Lifetime[14]
+          Now listening on: http://localhost:5000
+    info: Microsoft.Hosting.Lifetime[0]
+          Application started. Press Ctrl+C to shut down.
+    ```
+
+    <Tip>
+      The SQLite database is created automatically on first run. No manual database setup required!
+    </Tip>
+  </Step>
+
+  <Step title="Verify the service is running">
+    Open your browser and navigate to:
+
+    ```
+    http://localhost:5000
+    ```
+
+    You should see the **Swagger UI** with all available endpoints documented. This is your interactive API playground.
+
+    <Note>
+      Swagger is only available in development mode. In production, this endpoint would be disabled.
+    </Note>
+  </Step>
+
+  <Step title="Register a new user">
+    Create your first user account:
+
+    ```bash
+    curl -X POST http://localhost:5000/api/auth/register \
+      -H "Content-Type: application/json" \
+      -d '{
+        "username": "john_doe",
+        "email": "john@example.com",
+        "password": "SecurePass123!"
+      }'
+    ```
+
+    **Response (201 Created):**
+
+    ```json
+    {
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "refreshToken": "8f3ZHk9mN2pQr5tVwXyZ1aB4cD6eF8gH...",
+      "accessTokenExpiry": "2026-03-10T05:15:00Z",
+      "user": {
+        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "username": "john_doe",
+        "email": "john@example.com",
+        "createdAt": "2026-03-10T05:00:00Z"
+      }
+    }
+    ```
+
+    <Note>
+      Password requirements: minimum 8 characters, must include uppercase, lowercase, numbers, and special characters.
+    </Note>
+
+    **Save your tokens!** You'll need them for the next steps. Export them as environment variables:
+
+    ```bash
+    export ACCESS_TOKEN="your_access_token_here"
+    export REFRESH_TOKEN="your_refresh_token_here"
+    ```
+  </Step>
+
+  <Step title="Access a protected endpoint">
+    Use your access token to get your user profile:
+
+    ```bash
+    curl -X GET http://localhost:5000/api/auth/me \
+      -H "Authorization: Bearer $ACCESS_TOKEN"
+    ```
+
+    **Response (200 OK):**
+
+    ```json
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "username": "john_doe",
+      "email": "john@example.com",
+      "createdAt": "2026-03-10T05:00:00Z"
+    }
+    ```
+
+    <Tip>
+      If you get a 401 Unauthorized error, check that your token is correctly formatted and hasn't expired (15-minute lifetime).
+    </Tip>
+  </Step>
+
+  <Step title="Refresh your access token">
+    Access tokens expire after 15 minutes. Use your refresh token to get a new one:
+
+    ```bash
+    curl -X POST http://localhost:5000/api/auth/refresh \
+      -H "Content-Type: application/json" \
+      -d '{
+        "refreshToken": "'$REFRESH_TOKEN'"
+      }'
+    ```
+
+    **Response (200 OK):**
+
+    ```json
+    {
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...NEW_TOKEN",
+      "refreshToken": "9g4AIj0nO3kRs6uWxYzA2bC5dE7fG9hI...NEW_REFRESH",
+      "accessTokenExpiry": "2026-03-10T05:30:00Z",
+      "user": {
+        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "username": "john_doe",
+        "email": "john@example.com",
+        "createdAt": "2026-03-10T05:00:00Z"
+      }
+    }
+    ```
+
+    <Warning>
+      **Token Rotation:** The old refresh token is automatically revoked when you get a new one. Always store the latest tokens!
+    </Warning>
+
+    Update your environment variables with the new tokens:
+
+    ```bash
+    export ACCESS_TOKEN="new_access_token_here"
+    export REFRESH_TOKEN="new_refresh_token_here"
+    ```
+  </Step>
+
+  <Step title="Log out (revoke token)">
+    When you're done, revoke your refresh token:
+
+    ```bash
+    curl -X POST http://localhost:5000/api/auth/revoke \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -d '{
+        "refreshToken": "'$REFRESH_TOKEN'",
+        "reason": "Manual logout"
+      }'
+    ```
+
+    **Response (200 OK):**
+
+    ```json
+    {
+      "message": "Token revocado exitosamente."
+    }
+    ```
+
+    After revocation, the refresh token can no longer be used to get new access tokens.
+  </Step>
+</Steps>
+
+## Complete Flow Example
+
+Here's the entire authentication flow in one script:
+
+<CodeGroup>
+
+```bash Complete Flow
+#!/bin/bash
+
+# 1. Register a new user
+REGISTER_RESPONSE=$(curl -s -X POST http://localhost:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "jane_smith",
+    "email": "jane@example.com",
+    "password": "SecurePass456!"
+  }')
+
+echo "Registration Response:"
+echo $REGISTER_RESPONSE | jq .
+
+# Extract tokens
+ACCESS_TOKEN=$(echo $REGISTER_RESPONSE | jq -r '.accessToken')
+REFRESH_TOKEN=$(echo $REGISTER_RESPONSE | jq -r '.refreshToken')
+
+# 2. Get user profile
+echo "\nFetching user profile..."
+curl -s -X GET http://localhost:5000/api/auth/me \
+  -H "Authorization: Bearer $ACCESS_TOKEN" | jq .
+
+# 3. Refresh the token
+echo "\nRefreshing tokens..."
+REFRESH_RESPONSE=$(curl -s -X POST http://localhost:5000/api/auth/refresh \
+  -H "Content-Type: application/json" \
+  -d '{"refreshToken": "'$REFRESH_TOKEN'"}')
+
+echo $REFRESH_RESPONSE | jq .
+
+# Update tokens
+ACCESS_TOKEN=$(echo $REFRESH_RESPONSE | jq -r '.accessToken')
+REFRESH_TOKEN=$(echo $REFRESH_RESPONSE | jq -r '.refreshToken')
+
+# 4. Log out
+echo "\nLogging out..."
+curl -s -X POST http://localhost:5000/api/auth/revoke \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{
+    "refreshToken": "'$REFRESH_TOKEN'",
+    "reason": "Script completed"
+  }' | jq .
+```
+
+```javascript Node.js Example
+const fetch = require('node-fetch');
+
+const BASE_URL = 'http://localhost:5000';
+
+async function quickstart() {
+  // 1. Register
+  const registerRes = await fetch(`${BASE_URL}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: 'alice_dev',
+      email: 'alice@example.com',
+      password: 'DevPass789!'
+    })
+  });
+  
+  let data = await registerRes.json();
+  console.log('Registered:', data.user);
+  
+  let { accessToken, refreshToken } = data;
+  
+  // 2. Get profile
+  const profileRes = await fetch(`${BASE_URL}/api/auth/me`, {
+    headers: { 'Authorization': `Bearer ${accessToken}` }
+  });
+  
+  const profile = await profileRes.json();
+  console.log('Profile:', profile);
+  
+  // 3. Refresh token
+  const refreshRes = await fetch(`${BASE_URL}/api/auth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken })
+  });
+  
+  data = await refreshRes.json();
+  console.log('Tokens refreshed successfully');
+  
+  accessToken = data.accessToken;
+  refreshToken = data.refreshToken;
+  
+  // 4. Logout
+  await fetch(`${BASE_URL}/api/auth/revoke`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${accessToken}`
+    },
+    body: JSON.stringify({
+      refreshToken,
+      reason: 'Script completed'
+    })
+  });
+  
+  console.log('Logged out successfully');
+}
+
+quickstart().catch(console.error);
+```
+
+```python Python Example
+import requests
+import json
+
+BASE_URL = 'http://localhost:5000'
+
+def quickstart():
+    # 1. Register
+    response = requests.post(
+        f'{BASE_URL}/api/auth/register',
+        json={
+            'username': 'bob_dev',
+            'email': 'bob@example.com',
+            'password': 'DevPass999!'
+        }
+    )
+    data = response.json()
+    print('Registered:', data['user'])
+    
+    access_token = data['accessToken']
+    refresh_token = data['refreshToken']
+    
+    # 2. Get profile
+    response = requests.get(
+        f'{BASE_URL}/api/auth/me',
+        headers={'Authorization': f'Bearer {access_token}'}
+    )
+    profile = response.json()
+    print('Profile:', profile)
+    
+    # 3. Refresh token
+    response = requests.post(
+        f'{BASE_URL}/api/auth/refresh',
+        json={'refreshToken': refresh_token}
+    )
+    data = response.json()
+    print('Tokens refreshed successfully')
+    
+    access_token = data['accessToken']
+    refresh_token = data['refreshToken']
+    
+    # 4. Logout
+    requests.post(
+        f'{BASE_URL}/api/auth/revoke',
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {access_token}'
+        },
+        json={
+            'refreshToken': refresh_token,
+            'reason': 'Script completed'
+        }
+    )
+    print('Logged out successfully')
+
+if __name__ == '__main__':
+    quickstart()
+```
+
+</CodeGroup>
+
+## Common Errors and Solutions
+
+<Card title="401 Unauthorized" icon="lock">
+  **Cause:** Invalid or expired access token
+  
+  **Solution:** Use the `/api/auth/refresh` endpoint to get a new access token using your refresh token.
+</Card>
+
+<Card title="409 Conflict" icon="user-xmark">
+  **Cause:** Email already exists in the system
+  
+  **Solution:** Use a different email address or log in with the existing account.
+</Card>
+
+<Card title="400 Bad Request" icon="circle-exclamation">
+  **Cause:** Invalid request data (missing fields, invalid email format, weak password)
+  
+  **Solution:** Check the response body for specific validation errors and adjust your request.
+</Card>
+
+## Understanding Token Lifetimes
+
+| Token Type | Lifetime | Purpose | Storage |
+|------------|----------|---------|----------|
+| **Access Token** | 15 minutes | Authenticate API requests | Memory only (never localStorage) |
+| **Refresh Token** | 7 days | Get new access tokens | Secure, HttpOnly cookie or secure storage |
+
+<Warning>
+  **Security Best Practice:** Never store tokens in localStorage or sessionStorage in web applications. Use secure, HttpOnly cookies or in-memory storage only.
+</Warning>
+
+## Next Steps
+
+Now that you have the basics working:
+
+- [Explore all API endpoints](/api/register)
+- [Learn about token rotation and security](/concepts/token-rotation)
+- [Understand the authentication flow](/concepts/authentication-flow)
+- [Deploy to production](/guides/production-deployment)
+
+## Using Swagger UI
+
+Prefer a visual interface? The Swagger UI at `http://localhost:5000` lets you:
+
+1. **Click "Authorize"** in the top right
+2. **Enter your access token** in the format: `Bearer your_token_here`
+3. **Try out endpoints** with the interactive interface
+4. **See real-time request/response data**
+
+<Tip>
+  Swagger automatically includes your token in subsequent requests after you authorize, making testing much easier!
+</Tip>

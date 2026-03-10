@@ -1,0 +1,320 @@
+---
+title: Account Lockout
+description: How account lockout protects against brute-force attacks
+---
+
+## Overview
+
+AuthService implements **account lockout** to protect against brute-force password attacks. After **5 failed login attempts**, accounts are temporarily locked for **15 minutes**.
+
+<Warning>
+Account lockout is a critical security control that prevents attackers from making unlimited password guessing attempts. Without it, an attacker could try millions of password combinations.
+</Warning>
+
+## Implementation Details
+
+### Lockout Configuration
+
+The lockout parameters are configured as constants in the AuthService:
+
+```csharp Services/AuthService.cs
+public class AuthService : IAuthService
+{
+    // Después de 5 intentos fallidos, bloquear por 15 minutos
+    private const int MaxFailedAttempts = 5;
+    private const int LockoutMinutes = 15;
+    
+    // ...
+}
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|----------|
+| **Max Failed Attempts** | 5 | Balances security and user experience; legitimate users rarely exceed this |
+| **Lockout Duration** | 15 minutes | Long enough to slow brute-force attacks, short enough to not frustrate users |
+
+### User Entity Schema
+
+Lockout state is tracked directly in the User entity:
+
+```csharp Entities/User.cs
+public class User
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Username { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
+
+    // Control de intentos fallidos
+    public int FailedLoginAttempts { get; set; } = 0;
+    public DateTime? LockoutEnd { get; set; }
+
+    public bool IsActive { get; set; } = true;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? LastLoginAt { get; set; }
+
+    public bool IsLockedOut() =>
+        LockoutEnd.HasValue && LockoutEnd.Value > DateTime.UtcNow;
+}
+```
+
+**Key Fields:**
+- `FailedLoginAttempts` - Counter incremented on each failed login
+- `LockoutEnd` - Timestamp when the lockout expires (null if not locked)
+- `IsLockedOut()` - Computed property checking if lockout is currently active
+
+<Info>
+Using a nullable `DateTime?` for `LockoutEnd` allows us to distinguish between "never locked" (null) and "locked until X time" (has value). This is more efficient than storing separate boolean flags.
+</Info>
+
+## Login Flow with Lockout
+
+### Step 1: Check Account Status
+
+Before verifying the password, the service checks if the account is locked:
+
+```csharp Services/AuthService.cs
+public async Task<AuthResponse> LoginAsync(LoginRequest request, string ipAddress)
+{
+    var user = await _db.Users
+        .FirstOrDefaultAsync(u => u.Email == request.Email.ToLower());
+
+    if (user == null)
+    {
+        // Respuesta genérica para no revelar si el email existe
+        throw new UnauthorizedAccessException("Credenciales inválidas.");
+    }
+
+    if (!user.IsActive)
+        throw new UnauthorizedAccessException("Cuenta desactivada.");
+
+    if (user.IsLockedOut())
+    {
+        var remaining = (int)(user.LockoutEnd!.Value - DateTime.UtcNow).TotalMinutes + 1;
+        throw new UnauthorizedAccessException(
+            $"Cuenta bloqueada temporalmente. Intenta en {remaining} minuto(s).");
+    }
+    
+    // Continue to password verification...
+}
+```
+
+<Note>
+The lockout check happens **before** password verification. This prevents attackers from using password verification timing to determine if an account is locked.
+</Note>
+
+### Step 2: Handle Failed Attempts
+
+When password verification fails, the failed attempt counter is incremented:
+
+```csharp Services/AuthService.cs
+if (!_passwordService.Verify(request.Password, user.PasswordHash))
+{
+    user.FailedLoginAttempts++;
+
+    if (user.FailedLoginAttempts >= MaxFailedAttempts)
+    {
+        user.LockoutEnd = DateTime.UtcNow.AddMinutes(LockoutMinutes);
+        _logger.LogWarning("Cuenta bloqueada por intentos fallidos: {Email}", user.Email);
+    }
+
+    await _db.SaveChangesAsync();
+    throw new UnauthorizedAccessException("Credenciales inválidas.");
+}
+```
+
+**Flow:**
+1. Increment `FailedLoginAttempts` counter
+2. If counter reaches threshold (5), set `LockoutEnd` to 15 minutes from now
+3. Log the lockout event for security monitoring
+4. Save changes to database
+5. Return generic error message
+
+<Warning>
+The error message "Credenciales inválidas" is intentionally generic. It does NOT reveal:
+- Whether the email exists in the system
+- Whether the account is now locked
+- How many attempts remain
+
+This prevents attackers from enumerating valid email addresses or knowing when they've triggered a lockout.
+</Warning>
+
+### Step 3: Reset on Successful Login
+
+When a login succeeds, the lockout state is cleared:
+
+```csharp Services/AuthService.cs
+// Login exitoso -- resetear contadores
+user.FailedLoginAttempts = 0;
+user.LockoutEnd = null;
+user.LastLoginAt = DateTime.UtcNow;
+
+await _db.SaveChangesAsync();
+
+_logger.LogInformation("Login exitoso: {Email} desde {Ip}", user.Email, ipAddress);
+
+return await CreateAuthResponseAsync(user, ipAddress);
+```
+
+This ensures users are not permanently locked out and can immediately try again after the lockout expires.
+
+## Security Rationale
+
+### Generic Error Messages
+
+The implementation uses **generic error messages** to prevent user enumeration:
+
+```csharp
+// ❌ BAD: Reveals information
+if (user == null)
+    throw new UnauthorizedAccessException("Email not found");
+if (!passwordValid)
+    throw new UnauthorizedAccessException("Wrong password");
+if (user.IsLockedOut())
+    throw new UnauthorizedAccessException("Account locked");
+
+// ✅ GOOD: Generic response
+if (user == null || !passwordValid)
+    throw new UnauthorizedAccessException("Credenciales inválidas.");
+```
+
+<Info>
+**User Enumeration Attack**: An attacker tries to determine which email addresses have accounts in the system by observing different error messages. With generic messages, all failed logins look identical, making enumeration much harder.
+</Info>
+
+### Why Show Lockout Status?
+
+You might notice that when an account IS locked, we show a specific message:
+
+```csharp
+throw new UnauthorizedAccessException(
+    $"Cuenta bloqueada temporalmente. Intenta en {remaining} minuto(s).");
+```
+
+**This is acceptable because:**
+1. The attacker already knows the account exists (they triggered the lockout)
+2. Telling legitimate users about the lockout improves UX
+3. It still doesn't reveal the password or whether previous attempts were close
+4. The lockout itself stops the attack
+
+### Lockout Duration Trade-offs
+
+| Duration | Security | User Experience |
+|----------|----------|----------------|
+| 5 minutes | Weaker protection, ~12 attempts/hour | Better for legitimate users |
+| **15 minutes** | **Good balance, ~4 attempts/hour** | **Acceptable frustration** |
+| 30 minutes | Stronger protection, ~2 attempts/hour | May frustrate users |
+| Permanent | Requires manual unlock or email reset | Poor UX, DoS risk |
+
+<Tip>
+The 15-minute lockout is a **temporary** measure. For permanent account security issues, use the `IsActive` flag to disable accounts entirely.
+</Tip>
+
+## Attack Scenarios
+
+### Brute-Force Attack
+
+**Without Lockout:**
+```
+Attacker tries: 1,000,000 passwords
+Time: ~55 hours at 5 attempts/second
+Cost: Minimal (automated script)
+```
+
+**With Lockout:**
+```
+Attacker tries: 5 passwords
+Result: Account locked for 15 minutes
+Max attempts: 4 per hour = 96 per day
+Result: Brute-force becomes impractical
+```
+
+### Distributed Attack
+
+<Warning>
+Account lockout alone doesn't prevent **distributed** brute-force attacks where an attacker tries a few passwords on MANY different accounts. This requires additional defenses:
+- Rate limiting by IP address
+- CAPTCHA after suspicious patterns
+- Web Application Firewall (WAF)
+- Anomaly detection
+</Warning>
+
+### Account Lockout DoS
+
+**Attack:** An attacker intentionally locks out legitimate users by making 5 failed login attempts per account.
+
+**Mitigations:**
+1. **Temporary lockout** - 15 minutes is annoying but not critical
+2. **Generic messages** - Attacker can't confirm if lockout succeeded
+3. **Monitoring** - Unusual lockout patterns trigger alerts
+4. **Password reset** - Users can bypass via email verification
+
+## Monitoring and Logging
+
+The system logs lockout events for security monitoring:
+
+```csharp Services/AuthService.cs
+_logger.LogWarning("Cuenta bloqueada por intentos fallidos: {Email}", user.Email);
+```
+
+**What to Monitor:**
+- Spike in lockout events (possible attack)
+- Same IP causing multiple lockouts (distributed attack)
+- Lockouts on admin/service accounts (targeted attack)
+- Unusual geographic patterns
+
+<Info>
+Integrate these logs with a Security Information and Event Management (SIEM) system for real-time threat detection and automated response.
+</Info>
+
+## Best Practices
+
+### Configuration
+
+1. **Adjust for your threat model** - High-security applications may use 3 attempts / 30 minutes
+2. **Consider account value** - Admin accounts might have stricter limits
+3. **Make it configurable** - Use configuration files instead of constants for production
+
+### User Experience
+
+1. **Show remaining time** - Help legitimate users know when to retry
+2. **Offer password reset** - Provide an escape hatch for locked users
+3. **Email notification** - Alert users when their account is locked (possible compromise)
+4. **Multi-factor authentication** - Stronger than lockout alone
+
+### Additional Security Layers
+
+1. **Rate limiting** - Limit requests per IP address
+2. **CAPTCHA** - After 2-3 failed attempts
+3. **IP reputation** - Block known malicious IPs
+4. **Device fingerprinting** - Detect suspicious login patterns
+5. **Anomaly detection** - Machine learning to identify attacks
+
+## Testing Lockout Behavior
+
+To test the lockout mechanism:
+
+```bash
+# Attempt 1-4: Should fail with "Credenciales inválidas"
+curl -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"wrong"}'
+
+# Attempt 5: Should trigger lockout
+curl -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"wrong"}'
+
+# Attempt 6: Should show lockout message
+curl -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"correct"}'
+# Response: "Cuenta bloqueada temporalmente. Intenta en 15 minuto(s)."
+```
+
+## Related Topics
+
+- [Password Hashing](/security/password-hashing) - How passwords are securely stored
+- [Token Validation](/security/token-validation) - JWT security after successful login
+- [Authentication Flow](/concepts/authentication-flow) - Complete login process
+- [Error Handling](/guides/error-handling) - API error responses

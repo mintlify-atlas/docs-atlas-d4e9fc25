@@ -1,0 +1,714 @@
+---
+title: Production Deployment
+description: Checklist and guide for deploying AuthService to production
+---
+
+## Overview
+
+Deploying AuthService to production requires several critical security and infrastructure changes. This guide provides a comprehensive checklist to ensure your deployment is secure, scalable, and reliable.
+
+<Warning>
+  **DO NOT deploy to production without completing this checklist.** The default configuration is designed for development only and is not secure for production use.
+</Warning>
+
+## Pre-Deployment Checklist
+
+### 1. Secure JWT Secret Key
+
+<Steps>
+  <Step title="Generate a strong secret key">
+    The default secret key must be replaced with a cryptographically secure random value.
+    
+    **Current development config (appsettings.json:6)**:
+    ```json
+    "SecretKey": "CAMBIA-ESTO-EN-PRODUCCION-usa-un-valor-largo-y-aleatorio-min32chars"
+    ```
+    
+    Generate a secure key:
+    ```bash
+    openssl rand -base64 64
+    ```
+    
+    <Warning>
+      If an attacker obtains your secret key, they can forge valid JWT tokens for any user. This is your most critical security setting.
+    </Warning>
+  </Step>
+  
+  <Step title="Store in secure vault">
+    **Never** store the production secret key in `appsettings.json`. Use:
+    
+    <Tabs>
+      <Tab title="Azure Key Vault">
+        ```bash
+        # Store secret in Azure Key Vault
+        az keyvault secret set --vault-name your-vault \
+          --name JwtSecretKey \
+          --value "your-generated-secret-key"
+        ```
+        
+        Configure in `Program.cs`:
+        ```csharp
+        builder.Configuration.AddAzureKeyVault(
+            new Uri($"https://{vaultName}.vault.azure.net/"),
+            new DefaultAzureCredential());
+        ```
+      </Tab>
+      
+      <Tab title="AWS Secrets Manager">
+        ```bash
+        # Store secret in AWS Secrets Manager
+        aws secretsmanager create-secret \
+          --name JwtSecretKey \
+          --secret-string "your-generated-secret-key"
+        ```
+        
+        Retrieve in application using AWS SDK.
+      </Tab>
+      
+      <Tab title="Environment Variables">
+        ```bash
+        export Jwt__SecretKey="your-generated-secret-key"
+        ```
+        
+        ASP.NET Core will automatically override the config value.
+      </Tab>
+      
+      <Tab title="Kubernetes Secrets">
+        ```yaml
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: authservice-secrets
+        type: Opaque
+        data:
+          jwt-secret-key: <base64-encoded-key>
+        ```
+        
+        Mount as environment variable in deployment.
+      </Tab>
+    </Tabs>
+  </Step>
+  
+  <Step title="Update production config">
+    In `appsettings.Production.json`, reference the secret from environment:
+    
+    ```json
+    {
+      "Jwt": {
+        "SecretKey": "${JWT_SECRET_KEY}"
+      }
+    }
+    ```
+    
+    Or remove the key entirely and set via environment variable.
+  </Step>
+</Steps>
+
+### 2. Switch to Production Database
+
+The default SQLite database is not suitable for production.
+
+<Steps>
+  <Step title="Choose a production database">
+    **Current development config (appsettings.json:2-3)**:
+    ```json
+    "ConnectionStrings": {
+      "DefaultConnection": "Data Source=authservice.db"
+    }
+    ```
+    
+    <Note>
+      SQLite is single-file and not designed for concurrent access or high availability.
+    </Note>
+  </Step>
+  
+  <Step title="Install database provider">
+    <Tabs>
+      <Tab title="PostgreSQL">
+        ```bash
+        dotnet add package Npgsql.EntityFrameworkCore.PostgreSQL
+        ```
+        
+        Update `Program.cs:13-15`:
+        ```csharp
+        builder.Services.AddDbContext<AppDbContext>(options =>
+            options.UseNpgsql(
+                builder.Configuration.GetConnectionString("DefaultConnection")));
+        ```
+        
+        Connection string:
+        ```json
+        "ConnectionStrings": {
+          "DefaultConnection": "Host=db.example.com;Database=authservice;Username=authuser;Password=${DB_PASSWORD}"
+        }
+        ```
+      </Tab>
+      
+      <Tab title="SQL Server">
+        ```bash
+        dotnet add package Microsoft.EntityFrameworkCore.SqlServer
+        ```
+        
+        Update `Program.cs:13-15`:
+        ```csharp
+        builder.Services.AddDbContext<AppDbContext>(options =>
+            options.UseSqlServer(
+                builder.Configuration.GetConnectionString("DefaultConnection")));
+        ```
+        
+        Connection string:
+        ```json
+        "ConnectionStrings": {
+          "DefaultConnection": "Server=db.example.com;Database=AuthService;User Id=authuser;Password=${DB_PASSWORD};TrustServerCertificate=False;Encrypt=True;"
+        }
+        ```
+      </Tab>
+      
+      <Tab title="MySQL">
+        ```bash
+        dotnet add package Pomelo.EntityFrameworkCore.MySql
+        ```
+        
+        Update `Program.cs:13-15`:
+        ```csharp
+        builder.Services.AddDbContext<AppDbContext>(options =>
+            options.UseMySql(
+                builder.Configuration.GetConnectionString("DefaultConnection"),
+                ServerVersion.AutoDetect(builder.Configuration.GetConnectionString("DefaultConnection"))));
+        ```
+        
+        Connection string:
+        ```json
+        "ConnectionStrings": {
+          "DefaultConnection": "Server=db.example.com;Database=authservice;User=authuser;Password=${DB_PASSWORD};"
+        }
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+  
+  <Step title="Run migrations">
+    Remove the development auto-migration code from `Program.cs:85-91`:
+    
+    ```csharp
+    // REMOVE THIS IN PRODUCTION:
+    if (app.Environment.IsDevelopment())
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.Database.EnsureCreated();
+    }
+    ```
+    
+    Run migrations manually:
+    ```bash
+    dotnet ef migrations add InitialCreate
+    dotnet ef database update
+    ```
+    
+    <Warning>
+      `EnsureCreated()` does not use migrations and will fail if the database already exists. Always use migrations in production.
+    </Warning>
+  </Step>
+  
+  <Step title="Secure connection string">
+    Store connection string in environment variables or secure vault:
+    
+    ```bash
+    export ConnectionStrings__DefaultConnection="Server=...;Password=..."
+    ```
+  </Step>
+</Steps>
+
+### 3. Enable HTTPS
+
+<Steps>
+  <Step title="Obtain SSL/TLS certificate">
+    Options:
+    - **Let's Encrypt** (free, automated)
+    - Commercial certificate authority
+    - Cloud provider certificates (AWS ACM, Azure App Service Certificates)
+  </Step>
+  
+  <Step title="Configure HTTPS in Kestrel">
+    Add to `appsettings.Production.json`:
+    
+    ```json
+    {
+      "Kestrel": {
+        "Endpoints": {
+          "Https": {
+            "Url": "https://*:443",
+            "Certificate": {
+              "Path": "/etc/ssl/certs/authservice.pfx",
+              "Password": "${CERT_PASSWORD}"
+            }
+          }
+        }
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Enforce HTTPS redirection">
+    The service already includes HTTPS redirection in `Program.cs:102`:
+    
+    ```csharp
+    app.UseHttpsRedirection();
+    ```
+    
+    <Tip>
+      If behind a reverse proxy (nginx, load balancer), configure forwarded headers:
+      
+      ```csharp
+      app.UseForwardedHeaders(new ForwardedHeadersOptions
+      {
+          ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+      });
+      ```
+    </Tip>
+  </Step>
+  
+  <Step title="Update allowed hosts">
+    Restrict allowed hosts in `appsettings.Production.json`:
+    
+    ```json
+    {
+      "AllowedHosts": "yourdomain.com,api.yourdomain.com"
+    }
+    ```
+  </Step>
+</Steps>
+
+### 4. Implement Rate Limiting
+
+Protect against brute-force attacks and API abuse.
+
+<Steps>
+  <Step title="Add rate limiting middleware">
+    Install package:
+    ```bash
+    dotnet add package AspNetCoreRateLimit
+    ```
+    
+    Or use built-in .NET 7+ rate limiting:
+    ```bash
+    dotnet add package Microsoft.AspNetCore.RateLimiting
+    ```
+  </Step>
+  
+  <Step title="Configure rate limits">
+    Add to `Program.cs` after `var builder = WebApplication.CreateBuilder(args);`:
+    
+    ```csharp
+    using Microsoft.AspNetCore.RateLimiting;
+    using System.Threading.RateLimiting;
+    
+    // Add rate limiting
+    builder.Services.AddRateLimiter(options =>
+    {
+        // Strict limit for authentication endpoints
+        options.AddFixedWindowLimiter("auth", opt =>
+        {
+            opt.Window = TimeSpan.FromMinutes(1);
+            opt.PermitLimit = 5;
+            opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+            opt.QueueLimit = 0;
+        });
+        
+        // General API limit
+        options.AddFixedWindowLimiter("api", opt =>
+        {
+            opt.Window = TimeSpan.FromMinutes(1);
+            opt.PermitLimit = 100;
+        });
+    });
+    ```
+    
+    Apply to endpoints in `AuthController.cs`:
+    ```csharp
+    [HttpPost("login")]
+    [EnableRateLimiting("auth")]
+    public async Task<IActionResult> Login([FromBody] LoginRequest request)
+    {
+        // ...
+    }
+    ```
+    
+    Enable in pipeline (`Program.cs` after `app.UseHttpsRedirection()`):
+    ```csharp
+    app.UseRateLimiter();
+    ```
+  </Step>
+  
+  <Step title="Configure per-IP limits">
+    For more granular control:
+    
+    ```csharp
+    options.AddSlidingWindowLimiter("sliding", opt =>
+    {
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.PermitLimit = 10;
+        opt.SegmentsPerWindow = 4;
+    });
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The service already implements account lockout after 5 failed login attempts (`AuthService.cs:26-27`). Rate limiting provides an additional layer of protection at the network level.
+</Note>
+
+### 5. Configure Logging and Monitoring
+
+<Steps>
+  <Step title="Reduce log verbosity">
+    Update `appsettings.Production.json`:
+    
+    ```json
+    {
+      "Logging": {
+        "LogLevel": {
+          "Default": "Warning",
+          "Microsoft.AspNetCore": "Error",
+          "Microsoft.EntityFrameworkCore": "Error"
+        }
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Add structured logging">
+    Install Serilog:
+    ```bash
+    dotnet add package Serilog.AspNetCore
+    dotnet add package Serilog.Sinks.Console
+    dotnet add package Serilog.Sinks.File
+    ```
+    
+    Configure in `Program.cs`:
+    ```csharp
+    using Serilog;
+    
+    Log.Logger = new LoggerConfiguration()
+        .ReadFrom.Configuration(builder.Configuration)
+        .Enrich.FromLogContext()
+        .WriteTo.Console()
+        .WriteTo.File("logs/authservice-.log", rollingInterval: RollingInterval.Day)
+        .CreateLogger();
+    
+    builder.Host.UseSerilog();
+    ```
+  </Step>
+  
+  <Step title="Integrate monitoring">
+    Add Application Performance Monitoring (APM):
+    
+    - **Application Insights** (Azure)
+    - **CloudWatch** (AWS)
+    - **Datadog**
+    - **New Relic**
+    - **Elastic APM**
+    
+    Monitor key metrics:
+    - Request rate and latency
+    - Failed login attempts
+    - Token refresh rate
+    - Database connection pool
+    - Error rates
+  </Step>
+</Steps>
+
+### 6. Implement Key Rotation
+
+Regularly rotate JWT secret keys to limit impact of compromise.
+
+<Steps>
+  <Step title="Support multiple signing keys">
+    Modify token validation to accept multiple keys:
+    
+    ```csharp
+    var jwtSection = builder.Configuration.GetSection("Jwt");
+    var currentKey = jwtSection["SecretKey"];
+    var previousKey = jwtSection["PreviousSecretKey"]; // For rotation
+    
+    var signingKeys = new List<SecurityKey>
+    {
+        new SymmetricSecurityKey(Encoding.UTF8.GetBytes(currentKey))
+    };
+    
+    if (!string.IsNullOrEmpty(previousKey))
+    {
+        signingKeys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(previousKey)));
+    }
+    
+    builder.Services.AddAuthentication(/* ... */)
+        .AddJwtBearer(options =>
+        {
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKeys = signingKeys, // Accept multiple keys
+                // ... other settings
+            };
+        });
+    ```
+  </Step>
+  
+  <Step title="Update TokenService to use current key">
+    Ensure `TokenService.cs:29-30` always uses the current key for signing new tokens.
+  </Step>
+  
+  <Step title="Rotation procedure">
+    When rotating:
+    
+    1. Generate new key
+    2. Set as `SecretKey`, move old key to `PreviousSecretKey`
+    3. Deploy configuration
+    4. Wait for old tokens to expire (AccessTokenExpiryMinutes)
+    5. Remove `PreviousSecretKey`
+    
+    <Tip>
+      Automate rotation with:
+      - Scheduled task (monthly/quarterly)
+      - Infrastructure as Code (Terraform, CloudFormation)
+      - Key management service rotation
+    </Tip>
+  </Step>
+</Steps>
+
+### 7. Disable Development Features
+
+<Steps>
+  <Step title="Remove Swagger in production">
+    Swagger is already scoped to development in `Program.cs:86-98`:
+    
+    ```csharp
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI(/* ... */);
+    }
+    ```
+    
+    Ensure `ASPNETCORE_ENVIRONMENT=Production` is set.
+  </Step>
+  
+  <Step title="Disable detailed errors">
+    Add to `Program.cs`:
+    
+    ```csharp
+    if (!app.Environment.IsDevelopment())
+    {
+        app.UseExceptionHandler("/error");
+        app.UseHsts();
+    }
+    ```
+    
+    The existing `ExceptionHandlingMiddleware` already provides safe error responses.
+  </Step>
+</Steps>
+
+### 8. Security Headers
+
+Add security headers to protect against common attacks.
+
+<Steps>
+  <Step title="Add security headers middleware">
+    Add to `Program.cs` after `var app = builder.Build();`:
+    
+    ```csharp
+    app.Use(async (context, next) =>
+    {
+        context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+        context.Response.Headers.Add("X-Frame-Options", "DENY");
+        context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+        context.Response.Headers.Add("Referrer-Policy", "no-referrer");
+        context.Response.Headers.Add("Content-Security-Policy", "default-src 'self'");
+        await next();
+    });
+    ```
+  </Step>
+  
+  <Step title="Configure CORS properly">
+    Add CORS if your API is consumed by web clients:
+    
+    ```csharp
+    builder.Services.AddCors(options =>
+    {
+        options.AddPolicy("Production", policy =>
+        {
+            policy.WithOrigins("https://yourdomain.com")
+                  .AllowAnyMethod()
+                  .AllowAnyHeader();
+        });
+    });
+    
+    // In pipeline:
+    app.UseCors("Production");
+    ```
+  </Step>
+</Steps>
+
+## Deployment Architecture
+
+### Recommended Setup
+
+```
+┌─────────────┐
+│ Load        │
+│ Balancer    │ ← HTTPS (443)
+└──────┬──────┘
+       │
+       ├─────────────┬─────────────┐
+       │             │             │
+  ┌────▼────┐   ┌───▼─────┐  ┌───▼─────┐
+  │ Auth    │   │ Auth    │  │ Auth    │
+  │ Service │   │ Service │  │ Service │
+  │ (Instance)  │ (Instance)  │ (Instance)
+  └────┬────┘   └───┬─────┘  └───┬─────┘
+       │            │             │
+       └────────────┴─────────────┘
+                    │
+            ┌───────▼────────┐
+            │   Database     │
+            │  (PostgreSQL/  │
+            │   SQL Server)  │
+            └────────────────┘
+```
+
+<Tip>
+  For high availability:
+  - Run at least 2 instances behind a load balancer
+  - Use a managed database service with automatic backups
+  - Implement health checks (see below)
+  - Use container orchestration (Kubernetes, ECS)
+</Tip>
+
+### Health Checks
+
+Add health check endpoints:
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<AppDbContext>();
+
+app.MapHealthChecks("/health");
+```
+
+## Deployment Checklist
+
+<Warning>
+  Use this checklist before every production deployment.
+</Warning>
+
+- [ ] JWT SecretKey changed and stored securely
+- [ ] Production database configured (PostgreSQL/SQL Server)
+- [ ] Database migrations applied
+- [ ] Connection strings stored in secure vault
+- [ ] HTTPS enabled with valid certificate
+- [ ] AllowedHosts restricted to production domains
+- [ ] Rate limiting configured
+- [ ] Logging configured with appropriate level (Warning/Error)
+- [ ] Monitoring and alerting set up
+- [ ] Swagger disabled in production
+- [ ] Development auto-migration code removed
+- [ ] Security headers added
+- [ ] CORS configured (if needed)
+- [ ] Health checks implemented
+- [ ] Load balancer/reverse proxy configured
+- [ ] Backup strategy implemented
+- [ ] Key rotation procedure documented
+- [ ] Environment variable `ASPNETCORE_ENVIRONMENT=Production` set
+- [ ] appsettings.Production.json reviewed
+- [ ] No secrets in source control
+
+## Container Deployment
+
+<Accordion title="Example Dockerfile">
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
+WORKDIR /app
+EXPOSE 80
+EXPOSE 443
+
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY ["AuthService.csproj", "./"]
+RUN dotnet restore "AuthService.csproj"
+COPY . .
+RUN dotnet build "AuthService.csproj" -c Release -o /app/build
+
+FROM build AS publish
+RUN dotnet publish "AuthService.csproj" -c Release -o /app/publish
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "AuthService.dll"]
+```
+</Accordion>
+
+<Accordion title="Example docker-compose.yml">
+```yaml
+version: '3.8'
+
+services:
+  authservice:
+    image: authservice:latest
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConnectionStrings__DefaultConnection=Host=db;Database=authservice;Username=authuser;Password=${DB_PASSWORD}
+      - Jwt__SecretKey=${JWT_SECRET_KEY}
+    ports:
+      - "5000:80"
+      - "5001:443"
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=authservice
+      - POSTGRES_USER=authuser
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+```
+</Accordion>
+
+## Post-Deployment
+
+<Steps>
+  <Step title="Verify deployment">
+    - Check health endpoint: `curl https://yourdomain.com/health`
+    - Test authentication flow
+    - Verify logs are being collected
+    - Check monitoring dashboards
+  </Step>
+  
+  <Step title="Performance testing">
+    Load test critical endpoints:
+    - `/api/auth/login`
+    - `/api/auth/refresh`
+    - `/api/auth/me`
+  </Step>
+  
+  <Step title="Security audit">
+    - Run security scanner (OWASP ZAP, Burp Suite)
+    - Verify no secrets in logs
+    - Test rate limiting
+    - Verify HTTPS enforcement
+  </Step>
+</Steps>
+
+## Related Topics
+
+- [Configuration](/guides/configuration) - Detailed configuration reference
+- [Error Handling](/guides/error-handling) - Understanding error responses
+- [API Reference](/api/register) - Testing your deployed service

@@ -1,0 +1,467 @@
+---
+title: Token Validation
+description: How JWT tokens are validated and secured
+---
+
+## Overview
+
+AuthService uses **JSON Web Tokens (JWT)** for stateless authentication. Every API request with a JWT is validated to ensure:
+- The token was signed by this server
+- The issuer and audience match expected values
+- The token hasn't expired
+- The signature algorithm is the expected one
+
+<Info>
+JWT tokens consist of three parts: Header (algorithm + token type), Payload (claims/data), and Signature (cryptographic verification). They're encoded as `header.payload.signature` in Base64URL format.
+</Info>
+
+## Token Validation Configuration
+
+Token validation is configured in `Program.cs` during application startup:
+
+```csharp Program.cs
+var jwtSection = builder.Configuration.GetSection("Jwt");
+var secretKey = jwtSection["SecretKey"] ?? throw new InvalidOperationException("JWT SecretKey not configured");
+var key = Encoding.UTF8.GetBytes(secretKey);
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(key),
+        ValidateIssuer = true,
+        ValidIssuer = jwtSection["Issuer"],
+        ValidateAudience = true,
+        ValidAudience = jwtSection["Audience"],
+        ValidateLifetime = true,
+        // Sin margen de tolerancia -- si el token expiró, expiró
+        ClockSkew = TimeSpan.Zero
+    }
+});
+```
+
+## Validation Parameters
+
+### Signature Verification
+
+```csharp
+ValidateIssuerSigningKey = true,
+IssuerSigningKey = new SymmetricSecurityKey(key),
+```
+
+**Purpose:** Ensures the token was signed by this server and hasn't been tampered with.
+
+<Warning>
+If an attacker modifies any part of the token (e.g., changing the user ID in the payload), the signature verification will fail. This prevents token forgery and tampering.
+</Warning>
+
+**How it works:**
+1. Server generates signature: `HMACSHA256(header + payload, secretKey)`
+2. Token includes this signature as the third part
+3. On validation, server recalculates signature and compares
+4. If signatures don't match → token is rejected
+
+### Issuer Validation
+
+```csharp
+ValidateIssuer = true,
+ValidIssuer = jwtSection["Issuer"],  // e.g., "AuthService"
+```
+
+**Purpose:** Verifies the token was issued by this specific service.
+
+<Info>
+Issuer validation is critical in microservice architectures where multiple services might issue tokens. It ensures a token from ServiceA can't be used to access ServiceB.
+</Info>
+
+**Token payload includes:**
+```json
+{
+  "iss": "AuthService",
+  "sub": "user-guid",
+  "email": "user@example.com"
+}
+```
+
+If `iss` doesn't match `ValidIssuer`, the token is rejected.
+
+### Audience Validation
+
+```csharp
+ValidateAudience = true,
+ValidAudience = jwtSection["Audience"],  // e.g., "AuthServiceUsers"
+```
+
+**Purpose:** Ensures the token is intended for this API.
+
+**Use case example:**
+```
+Token A: audience = "AdminAPI"
+Token B: audience = "UserAPI"
+
+AdminAPI accepts Token A, rejects Token B
+UserAPI accepts Token B, rejects Token A
+```
+
+This prevents tokens meant for one system from being used on another, even if issued by the same authority.
+
+### Lifetime Validation
+
+```csharp
+ValidateLifetime = true,
+```
+
+**Purpose:** Checks that the current time is between `nbf` (not before) and `exp` (expiration) claims.
+
+**Token payload includes:**
+```json
+{
+  "nbf": 1678901234,  // Not valid before this Unix timestamp
+  "exp": 1678902134,  // Expires at this Unix timestamp (15 min later)
+  "iat": 1678901234   // Issued at this timestamp
+}
+```
+
+<Note>
+Access tokens in AuthService have a **15-minute lifetime** by default. This short duration limits the window of opportunity if a token is compromised.
+</Note>
+
+### Clock Skew (Zero Tolerance)
+
+```csharp
+ClockSkew = TimeSpan.Zero
+```
+
+**Purpose:** Removes the default 5-minute grace period for token expiration.
+
+<Warning>
+This is one of the most important security configurations in AuthService. By default, ASP.NET Core JWT validation allows tokens to be valid for **5 minutes after expiration** to account for clock drift between servers.
+
+**Setting `ClockSkew = TimeSpan.Zero` means:** If the token says it expires at 2:00 PM, it's invalid at 2:00:01 PM. No exceptions.
+</Warning>
+
+**Why zero clock skew?**
+
+| Default (5 min skew) | Zero skew |
+|---------------------|----------|
+| 15-minute token = 20 minutes actual | 15-minute token = 15 minutes actual |
+| Stolen token usable for 5 extra minutes after "expiration" | Expired tokens immediately invalid |
+| Acceptable for large distributed systems | Better security for single-service or tightly-synced systems |
+
+**Trade-offs:**
+- ✅ **Better security:** Expired tokens are truly expired
+- ✅ **Predictable behavior:** Expiration time matches reality
+- ⚠️ **Clock sync required:** Servers must have accurate time (use NTP)
+- ⚠️ **No grace period:** Users may need to refresh slightly more often
+
+<Tip>
+If you're running in a distributed environment with potential clock drift, consider a small clock skew (1-2 minutes) instead of zero. For single-server or containerized deployments with NTP, zero is ideal.
+</Tip>
+
+## Token Generation
+
+Tokens are generated by the TokenService with all required claims:
+
+```csharp Services/TokenService.cs
+public string GenerateAccessToken(User user)
+{
+    var jwtSection = _config.GetSection("Jwt");
+    var secretKey = jwtSection["SecretKey"]!;
+    var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
+    var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+    var claims = new[]
+    {
+        new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
+        new Claim(JwtRegisteredClaimNames.Email, user.Email),
+        new Claim(JwtRegisteredClaimNames.UniqueName, user.Username),
+        new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+        new Claim(JwtRegisteredClaimNames.Iat,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+            ClaimValueTypes.Integer64)
+    };
+
+    var expiryMinutes = int.Parse(jwtSection["AccessTokenExpiryMinutes"] ?? "15");
+
+    var token = new JwtSecurityToken(
+        issuer: jwtSection["Issuer"],
+        audience: jwtSection["Audience"],
+        claims: claims,
+        notBefore: DateTime.UtcNow,
+        expires: DateTime.UtcNow.AddMinutes(expiryMinutes),
+        signingCredentials: creds
+    );
+
+    return new JwtSecurityTokenHandler().WriteToken(token);
+}
+```
+
+**Key claims:**
+- `sub` (Subject): User ID - uniquely identifies the user
+- `email`: User's email address
+- `unique_name`: Username for display
+- `jti` (JWT ID): Unique token identifier for revocation tracking
+- `iat` (Issued At): Timestamp when token was created
+
+<Info>
+The `jti` claim is crucial for implementing token revocation. While JWTs are stateless, you can maintain a revocation list of JWT IDs that should be rejected even if otherwise valid.
+</Info>
+
+## Validation in Action
+
+When a protected endpoint is called:
+
+1. **Extract token** from `Authorization: Bearer {token}` header
+2. **Validate signature** - Recalculate HMAC and compare
+3. **Check issuer** - Must match configured issuer
+4. **Check audience** - Must match configured audience
+5. **Check expiration** - Current time must be < `exp` claim (no clock skew)
+6. **Check not-before** - Current time must be >= `nbf` claim
+7. **Extract claims** - Populate `HttpContext.User` with claims
+
+If ANY validation fails → **401 Unauthorized**
+
+```csharp Controllers/AuthController.cs (example)
+[Authorize]  // Triggers JWT validation
+[HttpGet("me")]
+public async Task<IActionResult> GetCurrentUser()
+{
+    var userId = Guid.Parse(User.FindFirst(ClaimTypes.NameIdentifier)!.Value);
+    var user = await _authService.GetCurrentUserAsync(userId);
+    return Ok(user);
+}
+```
+
+## What Happens When Tokens Expire?
+
+### Access Token Expiration
+
+When an access token expires:
+
+```http
+GET /api/auth/me HTTP/1.1
+Authorization: Bearer {expired_token}
+```
+
+**Response:**
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="invalid_token", error_description="The token expired at '03/10/2026 14:15:00'"
+```
+
+<Note>
+With `ClockSkew = TimeSpan.Zero`, this happens **exactly** at the expiration time. With default settings, you'd get an extra 5 minutes.
+</Note>
+
+### Refresh Token Flow
+
+Clients should implement automatic token refresh:
+
+```typescript Client-side example
+async function apiCall(endpoint) {
+  let response = await fetch(endpoint, {
+    headers: { 'Authorization': `Bearer ${accessToken}` }
+  });
+  
+  if (response.status === 401) {
+    // Token expired - refresh it
+    accessToken = await refreshAccessToken(refreshToken);
+    
+    // Retry original request
+    response = await fetch(endpoint, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+  }
+  
+  return response;
+}
+```
+
+Refresh endpoint:
+
+```http
+POST /api/auth/refresh HTTP/1.1
+Content-Type: application/json
+
+{
+  "refreshToken": "base64_encoded_refresh_token"
+}
+```
+
+**Response:**
+```json
+{
+  "accessToken": "new_jwt_token",
+  "refreshToken": "new_refresh_token",
+  "accessTokenExpiry": "2026-03-10T14:30:00Z"
+}
+```
+
+<Warning>
+Refresh tokens use **token rotation** for security. Each refresh invalidates the old refresh token and issues a new one. If an old refresh token is reused, the entire token family is revoked, preventing token replay attacks.
+</Warning>
+
+## Security Best Practices
+
+### 1. Keep Secret Key Secure
+
+```bash
+# ❌ NEVER commit to source control
+"Jwt": {
+  "SecretKey": "my-super-secret-key-that-is-very-long-and-random"
+}
+
+# ✅ Use environment variables or secret management
+export JWT__SECRET_KEY="$(openssl rand -base64 64)"
+```
+
+<Warning>
+The secret key is the foundation of JWT security. If compromised, attackers can generate valid tokens for any user. Use a cryptographically random key of at least 256 bits (32 bytes).
+</Warning>
+
+### 2. Short Access Token Lifetime
+
+```json
+"Jwt": {
+  "AccessTokenExpiryMinutes": "15",  // ✅ Short-lived
+  "RefreshTokenExpiryDays": "7"      // ✅ Long-lived
+}
+```
+
+**Rationale:**
+- Short access tokens limit damage if stolen
+- Refresh tokens provide continuity without sacrificing security
+- 15 minutes is a good balance for most applications
+
+### 3. HTTPS Only
+
+```csharp Program.cs
+app.UseHttpsRedirection();
+```
+
+JWT tokens should **never** be transmitted over unencrypted HTTP. An attacker with network access could steal tokens and impersonate users.
+
+### 4. Validate Algorithm
+
+When manually validating expired tokens (e.g., for refresh flow):
+
+```csharp Services/TokenService.cs
+var handler = new JwtSecurityTokenHandler();
+var principal = handler.ValidateToken(token, validationParams, out var validatedToken);
+
+if (validatedToken is not JwtSecurityToken jwtToken ||
+    !jwtToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.OrdinalIgnoreCase))
+{
+    return null;
+}
+```
+
+<Warning>
+This prevents the **"none" algorithm attack** where an attacker removes the signature and sets the algorithm to "none". Always explicitly check that the algorithm matches your expectations.
+</Warning>
+
+### 5. Token Storage (Client-Side)
+
+**Access tokens:**
+- ✅ Memory (best, lost on page refresh)
+- ✅ HttpOnly cookies (good, protected from XSS)
+- ⚠️ LocalStorage (risky, vulnerable to XSS)
+- ❌ SessionStorage (same risks as LocalStorage)
+
+**Refresh tokens:**
+- ✅ HttpOnly, Secure, SameSite cookies (best)
+- ⚠️ Memory + secure persistence (mobile apps)
+- ❌ LocalStorage (too risky for long-lived tokens)
+
+## Debugging Token Issues
+
+### Decode JWT (Without Validation)
+
+Use [jwt.io](https://jwt.io) or:
+
+```bash
+# Extract payload (second part)
+echo "eyJ...payload..." | base64 -d | jq
+```
+
+### Common Issues
+
+<Accordion title="401 Unauthorized: Token expired">
+**Cause:** Token's `exp` claim is in the past.
+
+**Solution:** Use refresh token to get a new access token.
+
+**Prevention:** Implement automatic refresh before expiration.
+</Accordion>
+
+<Accordion title="401 Unauthorized: Invalid signature">
+**Cause:** Token was signed with a different key, or payload was modified.
+
+**Solution:** Check that JWT secret key matches between token generation and validation.
+
+**Common mistake:** Different secrets in development vs. production.
+</Accordion>
+
+<Accordion title="401 Unauthorized: Invalid issuer">
+**Cause:** Token's `iss` claim doesn't match `ValidIssuer`.
+
+**Solution:** Ensure configuration matches:
+```json
+"Jwt": {
+  "Issuer": "AuthService",  // Must match exactly
+  "Audience": "AuthServiceUsers"
+}
+```
+</Accordion>
+
+<Accordion title="401 Unauthorized: Invalid audience">
+**Cause:** Token's `aud` claim doesn't match `ValidAudience`.
+
+**Solution:** Check that the token was generated for this API.
+</Accordion>
+
+## Monitoring and Logging
+
+Log validation failures for security monitoring:
+
+```csharp
+builder.Services.AddAuthentication(...)
+.AddJwtBearer(options =>
+{
+    options.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = context =>
+        {
+            var logger = context.HttpContext.RequestServices
+                .GetRequiredService<ILogger<Program>>();
+                
+            logger.LogWarning(
+                "JWT validation failed: {Error} from {IP}",
+                context.Exception.Message,
+                context.HttpContext.Connection.RemoteIpAddress
+            );
+            
+            return Task.CompletedTask;
+        }
+    };
+});
+```
+
+**Monitor for:**
+- Spike in expired token attempts (possible stolen token)
+- Invalid signature attempts (token tampering)
+- Wrong issuer/audience (token reuse attack)
+- High failure rate from single IP (potential attack)
+
+## Related Topics
+
+- [Password Hashing](/security/password-hashing) - How passwords are secured
+- [Account Lockout](/security/account-lockout) - Brute-force protection
+- [Authentication Flow](/concepts/authentication-flow) - Complete auth process
+- [Refresh Tokens](/concepts/token-rotation) - Token rotation and renewal

@@ -1,0 +1,464 @@
+---
+title: 'Token Rotation'
+description: 'Deep dive into refresh token rotation and reuse attack detection'
+---
+
+## What is Token Rotation?
+
+**Token rotation** is a security mechanism where refresh tokens are **single-use only**. Each time a refresh token is used to obtain a new access token, the old refresh token is invalidated and a new one is issued.
+
+This prevents stolen refresh tokens from being useful to attackers for extended periods.
+
+## Why Token Rotation Matters
+
+<CardGroup cols={2}>
+  <Card title="Without Rotation" icon="triangle-exclamation">
+    **Problem:** A stolen refresh token can be used repeatedly for 7 days
+    
+    - Attacker steals token from compromised device
+    - Attacker uses token to get access tokens whenever needed
+    - Legitimate user continues using same token
+    - **No one notices the breach**
+  </Card>
+  
+  <Card title="With Rotation" icon="shield-check">
+    **Solution:** Stolen tokens become useless quickly
+    
+    - Attacker steals token from compromised device
+    - Legitimate user refreshes → old token invalidated
+    - Attacker tries to use old token → **DETECTED**
+    - System revokes all tokens for that user
+    - **Breach is detected and contained**
+  </Card>
+</CardGroup>
+
+## How It Works
+
+### Normal Token Refresh Flow
+
+<Steps>
+  <Step title="Client sends refresh token">
+    The client makes a request to refresh their access token:
+    
+    ```http
+    POST /api/auth/refresh
+    Content-Type: application/json
+    
+    {
+      "refreshToken": "ABC123..."
+    }
+    ```
+  </Step>
+  
+  <Step title="Server validates token">
+    The server looks up the token in the database (AuthService.cs:116-118):
+    
+    ```csharp
+    var storedToken = await _db.RefreshTokens
+        .Include(rt => rt.User)
+        .FirstOrDefaultAsync(rt => rt.Token == refreshToken);
+    
+    if (storedToken == null)
+        throw new UnauthorizedAccessException("Refresh token inválido.");
+    ```
+    
+    Then checks if it's active (AuthService.cs:134-135):
+    
+    ```csharp
+    if (storedToken.IsExpired)
+        throw new UnauthorizedAccessException("Refresh token expirado.");
+    ```
+  </Step>
+  
+  <Step title="Server rotates the token">
+    The old token is marked as revoked and replaced (AuthService.cs:137-144):
+    
+    ```csharp
+    // Create new refresh token
+    var newRefreshToken = CreateRefreshToken(ipAddress);
+    
+    // Mark old token as replaced
+    storedToken.RevokedAt = DateTime.UtcNow;
+    storedToken.RevokedByIp = ipAddress;
+    storedToken.ReplacedByToken = newRefreshToken.Token;
+    storedToken.RevocationReason = "Rotación normal";
+    
+    // Add new token to user's collection
+    storedToken.User.RefreshTokens.Add(newRefreshToken);
+    ```
+    
+    The database now contains:
+    
+    | Token | Status | ReplacedBy | Reason |
+    |-------|--------|------------|---------|
+    | ABC123 | Revoked | XYZ789 | Rotación normal |
+    | XYZ789 | Active | null | - |
+  </Step>
+  
+  <Step title="Server returns new tokens">
+    The client receives a fresh token pair (AuthService.cs:151):
+    
+    ```json
+    {
+      "accessToken": "eyJhbGc...",
+      "refreshToken": "XYZ789...",
+      "accessTokenExpiry": "2026-03-10T15:00:00Z",
+      "user": { ... }
+    }
+    ```
+  </Step>
+</Steps>
+
+### Detecting Token Reuse Attacks
+
+The magic happens when someone tries to use an **already-rotated token**.
+
+<Steps>
+  <Step title="Attacker uses stolen token">
+    An attacker has the old token `ABC123` and tries to refresh:
+    
+    ```http
+    POST /api/auth/refresh
+    
+    {"refreshToken": "ABC123"}
+    ```
+  </Step>
+  
+  <Step title="System detects reuse">
+    The server finds that `ABC123` was already used (AuthService.cs:125-132):
+    
+    ```csharp
+    // Token exists but is revoked - this is suspicious!
+    if (storedToken.IsRevoked)
+    {
+        _logger.LogWarning(
+            "Posible token reuse attack detectado para usuario {UserId}", 
+            storedToken.UserId);
+        
+        // Revoke the entire token family
+        await RevokeDescendantTokensAsync(storedToken, "Token reuse detectado");
+        await _db.SaveChangesAsync();
+        
+        throw new UnauthorizedAccessException("Refresh token revocado.");
+    }
+    ```
+  </Step>
+  
+  <Step title="System revokes token family">
+    The `RevokeDescendantTokensAsync` method recursively invalidates all descendant tokens (AuthService.cs:235-251):
+    
+    ```csharp
+    private async Task RevokeDescendantTokensAsync(RefreshToken token, string reason)
+    {
+        // If this token was replaced by another token, find it
+        if (string.IsNullOrEmpty(token.ReplacedByToken)) return;
+    
+        var childToken = await _db.RefreshTokens
+            .FirstOrDefaultAsync(rt => rt.Token == token.ReplacedByToken);
+    
+        if (childToken == null) return;
+    
+        // Revoke the child if it's still active
+        if (childToken.IsActive)
+        {
+            childToken.RevokedAt = DateTime.UtcNow;
+            childToken.RevocationReason = reason;
+        }
+    
+        // Recursively revoke all descendants
+        await RevokeDescendantTokensAsync(childToken, reason);
+    }
+    ```
+    
+    This follows the chain: `ABC123` → `XYZ789` → `DEF456` → ...
+    
+    All tokens in the family are revoked:
+    
+    | Token | Status | ReplacedBy | Reason |
+    |-------|--------|------------|---------|
+    | ABC123 | Revoked | XYZ789 | Rotación normal |
+    | XYZ789 | **Revoked** | DEF456 | **Token reuse detectado** |
+    | DEF456 | **Revoked** | null | **Token reuse detectado** |
+  </Step>
+  
+  <Step title="Legitimate user is logged out">
+    The legitimate user's current token (`DEF456`) is now invalid. Their next request fails:
+    
+    ```json
+    {
+      "status": 401,
+      "message": "Refresh token revocado."
+    }
+    ```
+    
+    They must log in again, which:
+    
+    1. Alerts them to potential compromise
+    2. Creates a new token family
+    3. Invalidates attacker's access
+  </Step>
+</Steps>
+
+<Warning>
+  **Legitimate user impact:** Yes, the real user is logged out when a reuse attack is detected. This is intentional—it's better to inconvenience a user than let an attacker maintain access.
+</Warning>
+
+## Token Family Visualization
+
+Here's how a token family evolves over time:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     TOKEN FAMILY LIFECYCLE                  │
+└─────────────────────────────────────────────────────────────┘
+
+Day 1: User logs in
+┌──────────┐
+│ Token A  │ Active (created at login)
+└──────────┘
+
+Day 2: User refreshes
+┌──────────┐     ┌──────────┐
+│ Token A  │────>│ Token B  │
+└──────────┘     └──────────┘
+ Revoked          Active
+ ReplacedBy: B
+
+Day 3: User refreshes again
+┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Token A  │────>│ Token B  │────>│ Token C  │
+└──────────┘     └──────────┘     └──────────┘
+ Revoked          Revoked          Active
+                  ReplacedBy: C
+
+Day 3: ATTACK! Attacker uses stolen Token A
+┌──────────┐     ┌──────────┐     ┌──────────┐
+│ Token A  │ ⚠️  │ Token B  │ ⚠️  │ Token C  │ ⚠️
+└──────────┘     └──────────┘     └──────────┘
+ Revoked          REVOKED          REVOKED
+ (reuse           (descendant)     (descendant)
+ detected)        Reason:          Reason:
+                  "Token reuse     "Token reuse
+                  detectado"       detectado"
+
+All tokens invalidated! User must re-authenticate.
+```
+
+## Token Storage Schema
+
+The `RefreshToken` entity tracks the complete rotation chain (RefreshToken.cs:1-26):
+
+```csharp
+public class RefreshToken
+{
+    public int Id { get; set; }
+    public Guid UserId { get; set; }
+    public string Token { get; set; }        // The token value itself
+    public DateTime ExpiresAt { get; set; }  // When it expires (7 days)
+    public DateTime CreatedAt { get; set; }  // When it was created
+    
+    // IP tracking for forensics
+    public string? CreatedByIp { get; set; }
+    
+    // Revocation tracking
+    public DateTime? RevokedAt { get; set; }      // When it was revoked
+    public string? RevokedByIp { get; set; }      // IP that revoked it
+    public string? ReplacedByToken { get; set; }  // ← KEY: Points to successor
+    public string? RevocationReason { get; set; } // Why it was revoked
+    
+    // Computed properties
+    public bool IsExpired => DateTime.UtcNow >= ExpiresAt;
+    public bool IsRevoked => RevokedAt.HasValue;
+    public bool IsActive => !IsRevoked && !IsExpired;
+    
+    public User User { get; set; }
+}
+```
+
+<Tip>
+  The `ReplacedByToken` field creates a **linked list** of tokens, allowing the system to traverse the entire family when a reuse is detected.
+</Tip>
+
+## Automatic Token Cleanup
+
+To prevent the database from growing indefinitely, old tokens are automatically removed (AuthService.cs:224-233):
+
+```csharp
+private static void RemoveOldTokens(User user)
+{
+    // Keep tokens for 30 days for forensic purposes
+    var cutoff = DateTime.UtcNow.AddDays(-30);
+    
+    var oldTokens = user.RefreshTokens
+        .Where(rt => !rt.IsActive && rt.CreatedAt < cutoff)
+        .ToList();
+    
+    foreach (var token in oldTokens)
+        user.RefreshTokens.Remove(token);
+}
+```
+
+This runs on every token refresh (AuthService.cs:147), keeping only:
+
+- All active tokens
+- Inactive tokens from the last 30 days (for forensics)
+
+## Edge Cases and Scenarios
+
+<AccordionGroup>
+  <Accordion title="What if the user has multiple devices?">
+    Each device gets its **own refresh token** during login. Token rotation is per-device:
+    
+    - Device A: Token family `A1 → A2 → A3`
+    - Device B: Token family `B1 → B2 → B3`
+    - Device C: Token family `C1 → C2`
+    
+    If Device A's token is reused, only the `A` family is revoked. Devices B and C continue working.
+    
+    All tokens are stored in `User.RefreshTokens` collection (User.cs:18).
+  </Accordion>
+  
+  <Accordion title="What if the network is flaky?">
+    **Problem:** Client sends refresh request, server responds with new token, but response is lost. Client retries with old token.
+    
+    **Result:** Detected as reuse attack, all tokens revoked.
+    
+    **Mitigation:**
+    
+    1. Use idempotency keys for refresh requests
+    2. Implement exponential backoff with jitter
+    3. Consider a short grace period (e.g., 5 seconds) where old token is still valid
+    
+    The current implementation **does not** have a grace period—security is prioritized over convenience.
+  </Accordion>
+  
+  <Accordion title="Can an attacker refresh first?">
+    **Scenario:** Attacker steals token and uses it before the legitimate user.
+    
+    **What happens:**
+    
+    1. Attacker refreshes with stolen token → gets new token
+    2. Legitimate user tries to refresh with old token → reuse detected
+    3. All tokens revoked, including attacker's new token
+    4. Both attacker and user are logged out
+    
+    **Result:** Attack is neutralized, but user must re-authenticate.
+  </Accordion>
+  
+  <Accordion title="What about token expiration?">
+    Expired tokens **cannot trigger reuse detection** because they're rejected before the reuse check (AuthService.cs:134-135):
+    
+    ```csharp
+    if (storedToken.IsExpired)
+        throw new UnauthorizedAccessException("Refresh token expirado.");
+    ```
+    
+    This prevents false positives when users try to use legitimately expired tokens.
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with Other Strategies
+
+<CardGroup cols={3}>
+  <Card title="No Rotation" icon="xmark">
+    **Security:** ⭐⭐
+    
+    **UX:** ⭐⭐⭐⭐⭐
+    
+    Stolen tokens work until expiry (7 days). No breach detection.
+  </Card>
+  
+  <Card title="Token Rotation" icon="check">
+    **Security:** ⭐⭐⭐⭐⭐
+    
+    **UX:** ⭐⭐⭐⭐
+    
+    Stolen tokens detected on next use. False positives from network issues.
+  </Card>
+  
+  <Card title="Rotation + Grace Period" icon="clock">
+    **Security:** ⭐⭐⭐⭐
+    
+    **UX:** ⭐⭐⭐⭐⭐
+    
+    Small window (5s) where old token still works. Reduces false positives.
+  </Card>
+</CardGroup>
+
+## Monitoring and Forensics
+
+Token rotation generates valuable security logs:
+
+```csharp
+_logger.LogWarning(
+    "Posible token reuse attack detectado para usuario {UserId}", 
+    storedToken.UserId);
+```
+
+**What to monitor:**
+
+- Frequency of reuse detections per user
+- IP addresses involved in reuse events
+- Time delta between token creation and reuse
+- Geographic location of IPs (if available)
+
+**Stored forensic data:**
+
+- `CreatedByIp`: Where token was originally issued (AuthService.cs:220)
+- `RevokedByIp`: Where revocation was requested (AuthService.cs:140, 164)
+- `RevocationReason`: Why token was revoked (AuthService.cs:142, 165, 247)
+- `CreatedAt`: Timestamp for age analysis (RefreshToken.cs:9)
+
+This data can help identify:
+
+- Compromised devices
+- Phishing attacks
+- Credential stuffing attempts
+- Unusual access patterns
+
+## Security Considerations
+
+<Warning>
+  **Token generation must be cryptographically secure.** The service uses `RandomNumberGenerator.GetBytes(64)` to generate 512-bit random tokens (TokenService.cs:64):
+  
+  ```csharp
+  public string GenerateRefreshToken()
+  {
+      var bytes = RandomNumberGenerator.GetBytes(64);
+      return Convert.ToBase64String(bytes);
+  }
+  ```
+  
+  Never use weak random number generators like `Random()` for tokens.
+</Warning>
+
+<Note>
+  **Why not make refresh tokens JWTs?** Refresh tokens are stored in the database anyway (for rotation tracking), so there's no benefit to making them JWTs. Random bytes are simpler and more efficient (TokenService.cs:58-66).
+</Note>
+
+## Best Practices
+
+1. **Keep access tokens short-lived** (15 minutes or less)
+2. **Implement token rotation** (as shown here)
+3. **Log all reuse detections** for security monitoring
+4. **Store IP addresses** for forensic analysis
+5. **Clean up old tokens** to prevent database bloat
+6. **Consider device fingerprinting** for additional validation
+7. **Use secure channels** (HTTPS only) for token transmission
+8. **Never log token values** (only metadata)
+
+## Related Topics
+
+<CardGroup cols={3}>
+  <Card title="Authentication Flow" icon="arrow-right-arrow-left" href="./authentication-flow">
+    See how token rotation fits into the complete auth flow
+  </Card>
+  
+  <Card title="Security Features" icon="shield-halved" href="./security-features">
+    Explore other security mechanisms in the service
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="../api-reference/authentication">
+    Complete endpoint documentation
+  </Card>
+</CardGroup>

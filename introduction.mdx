@@ -1,0 +1,79 @@
+---
+title: "Introduction"
+description: "Production-ready JWT authentication service with refresh token rotation and comprehensive security features for ASP.NET Core"
+---
+
+## What is AuthService?
+
+AuthService is a complete authentication service built with ASP.NET Core 8 that goes beyond basic JWT tutorials. It implements the full security lifecycle needed for production applications: user registration, login, token rotation, revocation, and protection against brute-force attacks.
+
+<Note>
+This service was built because most JWT tutorials skip over refresh token implementation—yet that's exactly where production security bugs occur.
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Token Rotation" icon="rotate" href="/concepts/token-rotation">
+    Automatic refresh token rotation with reuse detection
+  </Card>
+  <Card title="Security Features" icon="shield" href="/concepts/security-features">
+    PBKDF2-SHA512 hashing with 600k iterations
+  </Card>
+  <Card title="Account Protection" icon="lock" href="/security/account-lockout">
+    Account lockout after failed login attempts
+  </Card>
+  <Card title="Audit Trail" icon="list" href="/concepts/security-features">
+    Full token revocation history with IP tracking
+  </Card>
+</CardGroup>
+
+## Why AuthService?
+
+Most JWT examples in .NET simply return `new JwtSecurityToken(...)` and call it done. AuthService implements what you actually need in production:
+
+- **Real token rotation**: Every time you use a refresh token, the old one is revoked and a new one is issued. If someone tries to reuse an old token, the entire token family for that user is revoked.
+
+- **Proper password hashing**: PBKDF2-SHA512 with 600,000 iterations (OWASP 2024 recommendation), 32-byte random salt, and constant-time comparison to prevent timing attacks.
+
+- **Failed login protection**: After 5 failed attempts, the account is locked for 15 minutes. Error messages are intentionally generic to avoid revealing whether an email exists in the system.
+
+- **Revocation with traceability**: Every token stores the IP address it was created from, when it was revoked, why it was revoked, and which token replaced it.
+
+## Quick Example
+
+```csharp Program.cs
+// JWT authentication with zero clock skew
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+  .AddJwtBearer(options =>
+  {
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+      ValidateIssuerSigningKey = true,
+      IssuerSigningKey = new SymmetricSecurityKey(key),
+      ValidateIssuer = true,
+      ValidIssuer = jwtSection["Issuer"],
+      ValidateAudience = true,
+      ValidAudience = jwtSection["Audience"],
+      ValidateLifetime = true,
+      ClockSkew = TimeSpan.Zero // Exact expiration control
+    };
+  });
+```
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in 5 minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install and configure AuthService
+  </Card>
+  <Card title="Authentication Flow" icon="diagram-project" href="/concepts/authentication-flow">
+    Understand how token flow works
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/register">
+    Explore the authentication endpoints
+  </Card>
+</CardGroup>

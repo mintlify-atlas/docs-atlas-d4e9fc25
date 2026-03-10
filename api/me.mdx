@@ -1,0 +1,72 @@
+---
+title: "Get Current User"
+api: "GET /api/auth/me"
+description: "Retrieve information about the authenticated user"
+---
+
+## Description
+
+Returns information about the currently authenticated user based on the provided JWT access token.
+
+## Authentication
+
+Requires valid JWT access token in the Authorization header.
+
+**Header:** `Authorization: Bearer <access_token>`
+
+## Request
+
+No request body or parameters required. User identity is extracted from the JWT token.
+
+## Response
+
+<ResponseField name="Id" type="guid">
+  Unique identifier for the user.
+</ResponseField>
+
+<ResponseField name="Username" type="string">
+  The user's username.
+</ResponseField>
+
+<ResponseField name="Email" type="string">
+  The user's email address.
+</ResponseField>
+
+<ResponseField name="CreatedAt" type="datetime">
+  ISO 8601 timestamp indicating when the account was created.
+</ResponseField>
+
+## Status Codes
+
+- **200 OK**: Successfully retrieved user information
+- **401 Unauthorized**: Missing, invalid, or expired access token
+
+## Example Request
+
+```bash cURL
+curl -X GET https://api.example.com/api/auth/me \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+## Example Response
+
+```json 200 OK
+{
+  "Id": "123e4567-e89b-12d3-a456-426614174000",
+  "Username": "johndoe",
+  "Email": "john@example.com",
+  "CreatedAt": "2026-03-10T15:30:00Z"
+}
+```
+
+```json 401 Unauthorized
+{
+  "message": "Token inválido."
+}
+```
+
+## Usage Notes
+
+- This endpoint is useful for verifying token validity and retrieving current user context
+- The user ID is extracted from the JWT token's `NameIdentifier` or `sub` claim
+- No sensitive information like password hashes is returned

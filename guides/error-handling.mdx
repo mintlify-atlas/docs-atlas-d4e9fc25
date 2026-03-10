@@ -1,0 +1,813 @@
+---
+title: Error Handling
+description: Understanding error handling in AuthService
+---
+
+## Overview
+
+AuthService implements centralized error handling through the `ExceptionHandlingMiddleware`, which catches all unhandled exceptions and returns consistent, secure error responses.
+
+## ExceptionHandlingMiddleware
+
+The middleware is located at `Middleware/ExceptionHandlingMiddleware.cs` and is registered in the request pipeline in `Program.cs:100`:
+
+```csharp
+app.UseMiddleware<ExceptionHandlingMiddleware>();
+```
+
+<Note>
+  The middleware is placed early in the pipeline to catch exceptions from all subsequent middleware and endpoints.
+</Note>
+
+### How It Works
+
+The middleware wraps the entire request pipeline in a try-catch block:
+
+```csharp
+public async Task InvokeAsync(HttpContext context)
+{
+    try
+    {
+        await _next(context);
+    }
+    catch (Exception ex)
+    {
+        await HandleExceptionAsync(context, ex);
+    }
+}
+```
+
+When an exception occurs, it:
+
+1. **Maps the exception to an HTTP status code**
+2. **Logs the error if it's unexpected**
+3. **Returns a standardized JSON response**
+
+### Exception Mapping
+
+The middleware maps .NET exceptions to appropriate HTTP status codes (`ExceptionHandlingMiddleware.cs:31-38`):
+
+```csharp
+var (statusCode, message) = exception switch
+{
+    UnauthorizedAccessException => (HttpStatusCode.Unauthorized, exception.Message),
+    InvalidOperationException => (HttpStatusCode.Conflict, exception.Message),
+    KeyNotFoundException => (HttpStatusCode.NotFound, exception.Message),
+    ArgumentException => (HttpStatusCode.BadRequest, exception.Message),
+    _ => (HttpStatusCode.InternalServerError, "Ocurrió un error interno.")
+};
+```
+
+<Tip>
+  This pattern allows service code to throw standard .NET exceptions without worrying about HTTP concerns. The middleware handles the HTTP translation.
+</Tip>
+
+## HTTP Status Codes
+
+AuthService uses these HTTP status codes:
+
+### 200 OK
+
+**Usage**: Successful request
+
+**Endpoints**:
+- `POST /api/auth/login` - Successful authentication
+- `POST /api/auth/refresh` - Token refreshed successfully  
+- `POST /api/auth/revoke` - Token revoked successfully
+- `GET /api/auth/me` - User information retrieved
+
+**Example Response**:
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "CfDJ8...",
+  "accessTokenExpiry": "2026-03-10T15:30:00Z",
+  "user": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "username": "john_doe",
+    "email": "john@example.com",
+    "createdAt": "2026-01-15T10:00:00Z"
+  }
+}
+```
+
+### 201 Created
+
+**Usage**: Resource successfully created
+
+**Endpoints**:
+- `POST /api/auth/register` - User registered successfully
+
+**Example Response**:
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refreshToken": "CfDJ8...",
+  "accessTokenExpiry": "2026-03-10T15:30:00Z",
+  "user": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "username": "jane_doe",
+    "email": "jane@example.com",
+    "createdAt": "2026-03-10T14:00:00Z"
+  }
+}
+```
+
+### 400 Bad Request
+
+**Usage**: Invalid request data or parameters
+
+**Triggered by**: `ArgumentException` in code
+
+**Common Scenarios**:
+- Invalid email format
+- Missing required fields
+- Malformed JSON
+
+**Example Response** (`ExceptionHandlingMiddleware.cs:46-51`):
+```json
+{
+  "status": 400,
+  "message": "Invalid email format.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+<Accordion title="When is ArgumentException thrown?">
+  `ArgumentException` is typically thrown during input validation. While not explicitly thrown in the current codebase, you can add validation like:
+  
+  ```csharp
+  if (string.IsNullOrEmpty(request.Email))
+      throw new ArgumentException("Email is required.");
+      
+  if (!IsValidEmail(request.Email))
+      throw new ArgumentException("Invalid email format.");
+  ```
+</Accordion>
+
+### 401 Unauthorized
+
+**Usage**: Authentication failed or required
+
+**Triggered by**: `UnauthorizedAccessException` in code
+
+**Common Scenarios**:
+- Invalid credentials (`AuthService.cs:75, 99`)
+- Deactivated account (`AuthService.cs:79`)
+- Account locked out (`AuthService.cs:82-86`)
+- Invalid/expired JWT token
+- Invalid refresh token (`AuthService.cs:121, 135, 161`)
+- Missing Authorization header
+
+**Example Response**:
+```json
+{
+  "status": 401,
+  "message": "Credenciales inválidas.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+**Login Examples**:
+
+<CodeGroup>
+```json Invalid Credentials
+{
+  "status": 401,
+  "message": "Credenciales inválidas.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+```json Account Locked
+{
+  "status": 401,
+  "message": "Cuenta bloqueada temporalmente. Intenta en 14 minuto(s).",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+```json Account Deactivated
+{
+  "status": 401,
+  "message": "Cuenta desactivada.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+```json Invalid Refresh Token
+{
+  "status": 401,
+  "message": "Refresh token inválido.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+</CodeGroup>
+
+<Note>
+  The service uses generic error messages like "Credenciales inválidas" to avoid leaking information about which part failed (email vs password). This prevents attackers from enumerating valid email addresses (`AuthService.cs:72-76`).
+</Note>
+
+### 404 Not Found
+
+**Usage**: Requested resource doesn't exist
+
+**Triggered by**: `KeyNotFoundException` in code
+
+**Common Scenarios**:
+- User ID not found (`AuthService.cs:179`)
+- Invalid endpoint
+
+**Example Response**:
+```json
+{
+  "status": 404,
+  "message": "Usuario no encontrado.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+### 409 Conflict
+
+**Usage**: Request conflicts with current state
+
+**Triggered by**: `InvalidOperationException` in code
+
+**Common Scenarios**:
+- Email already registered (`AuthService.cs:50`)
+- Duplicate resource
+
+**Example Response**:
+```json
+{
+  "status": 409,
+  "message": "Ya existe una cuenta con ese email.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+<Tip>
+  Use 409 (Conflict) instead of 400 (Bad Request) when the request is well-formed but conflicts with existing data.
+</Tip>
+
+### 500 Internal Server Error
+
+**Usage**: Unexpected server error
+
+**Triggered by**: Any unhandled exception type
+
+**Common Scenarios**:
+- Database connection failure
+- Null reference exceptions
+- Unexpected runtime errors
+
+**Example Response** (`ExceptionHandlingMiddleware.cs:40-42`):
+```json
+{
+  "status": 500,
+  "message": "Ocurrió un error interno.",
+  "timestamp": "2026-03-10T14:15:00Z"
+}
+```
+
+<Warning>
+  500 errors are logged with full stack trace (`ExceptionHandlingMiddleware.cs:40-41`), but only a generic message is returned to the client to avoid leaking sensitive information:
+  
+  ```csharp
+  if (statusCode == HttpStatusCode.InternalServerError)
+      _logger.LogError(exception, "Error no controlado");
+  ```
+</Warning>
+
+## Error Response Format
+
+All error responses follow a consistent JSON structure (`ExceptionHandlingMiddleware.cs:46-58`):
+
+```json
+{
+  "status": 401,
+  "message": "Credenciales inválidas.",
+  "timestamp": "2026-03-10T14:15:00.123Z"
+}
+```
+
+**Fields**:
+- `status` (number): HTTP status code
+- `message` (string): Human-readable error message
+- `timestamp` (string): UTC timestamp when error occurred
+
+<Note>
+  The response uses `camelCase` for property names due to the JSON serialization settings:
+  
+  ```csharp
+  JsonSerializer.Serialize(response, new JsonSerializerOptions
+  {
+      PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+  })
+  ```
+</Note>
+
+## Common Error Scenarios
+
+### Registration Errors
+
+<Steps>
+  <Step title="Email already exists">
+    **Code**: `AuthService.cs:49-50`
+    
+    ```csharp
+    if (existingUser != null)
+        throw new InvalidOperationException("Ya existe una cuenta con ese email.");
+    ```
+    
+    **Response**: 409 Conflict
+    ```json
+    {
+      "status": 409,
+      "message": "Ya existe una cuenta con ese email.",
+      "timestamp": "2026-03-10T14:15:00Z"
+    }
+    ```
+  </Step>
+  
+  <Step title="Validation errors">
+    ASP.NET Core model validation automatically returns 400 for invalid DTOs:
+    
+    ```json
+    {
+      "type": "https://tools.ietf.org/html/rfc7231#section-6.5.1",
+      "title": "One or more validation errors occurred.",
+      "status": 400,
+      "errors": {
+        "Email": ["The Email field is required."]
+      }
+    }
+    ```
+    
+    <Note>
+      Model validation errors bypass the middleware and are handled by ASP.NET Core directly.
+    </Note>
+  </Step>
+</Steps>
+
+### Login Errors
+
+<Steps>
+  <Step title="Invalid credentials">
+    **Code**: `AuthService.cs:72-76, 88-100`
+    
+    ```csharp
+    if (user == null)
+    {
+        throw new UnauthorizedAccessException("Credenciales inválidas.");
+    }
+    
+    if (!_passwordService.Verify(request.Password, user.PasswordHash))
+    {
+        user.FailedLoginAttempts++;
+        // ...
+        throw new UnauthorizedAccessException("Credenciales inválidas.");
+    }
+    ```
+    
+    **Response**: 401 Unauthorized
+  </Step>
+  
+  <Step title="Account locked">
+    **Code**: `AuthService.cs:81-86`
+    
+    ```csharp
+    if (user.IsLockedOut())
+    {
+        var remaining = (int)(user.LockoutEnd!.Value - DateTime.UtcNow).TotalMinutes + 1;
+        throw new UnauthorizedAccessException(
+            $"Cuenta bloqueada temporalmente. Intenta en {remaining} minuto(s).");
+    }
+    ```
+    
+    **Response**: 401 Unauthorized with lockout duration
+    
+    <Tip>
+      Failed login attempts are tracked in `AuthService.cs:90`. After 5 attempts, the account is locked for 15 minutes (`AuthService.cs:26-27`).
+    </Tip>
+  </Step>
+  
+  <Step title="Account deactivated">
+    **Code**: `AuthService.cs:78-79`
+    
+    ```csharp
+    if (!user.IsActive)
+        throw new UnauthorizedAccessException("Cuenta desactivada.");
+    ```
+    
+    **Response**: 401 Unauthorized
+  </Step>
+</Steps>
+
+### Token Refresh Errors
+
+<Steps>
+  <Step title="Invalid refresh token">
+    **Code**: `AuthService.cs:120-121`
+    
+    ```csharp
+    if (storedToken == null)
+        throw new UnauthorizedAccessException("Refresh token inválido.");
+    ```
+    
+    **Response**: 401 Unauthorized
+  </Step>
+  
+  <Step title="Token reuse attack detected">
+    **Code**: `AuthService.cs:125-132`
+    
+    ```csharp
+    if (storedToken.IsRevoked)
+    {
+        _logger.LogWarning(
+            "Posible token reuse attack detectado para usuario {UserId}", storedToken.UserId);
+        await RevokeDescendantTokensAsync(storedToken, "Token reuse detectado");
+        await _db.SaveChangesAsync();
+        throw new UnauthorizedAccessException("Refresh token revocado.");
+    }
+    ```
+    
+    **Response**: 401 Unauthorized
+    
+    <Warning>
+      If a revoked token is reused, the service detects a potential attack and revokes all tokens in that family. This is part of the [refresh token rotation](https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-token-rotation) security strategy.
+    </Warning>
+  </Step>
+  
+  <Step title="Expired refresh token">
+    **Code**: `AuthService.cs:134-135`
+    
+    ```csharp
+    if (storedToken.IsExpired)
+        throw new UnauthorizedAccessException("Refresh token expirado.");
+    ```
+    
+    **Response**: 401 Unauthorized
+    
+    <Note>
+      Refresh tokens expire after 7 days by default (configurable via `Jwt:RefreshTokenExpiryDays`).
+    </Note>
+  </Step>
+</Steps>
+
+### JWT Token Errors
+
+JWT validation errors are handled by ASP.NET Core's JWT middleware before reaching your code:
+
+<Tabs>
+  <Tab title="Missing Token">
+    **Scenario**: No Authorization header provided
+    
+    **Response**: 401 Unauthorized
+    ```json
+    {
+      "status": 401,
+      "message": "Unauthorized"
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Expired Token">
+    **Scenario**: Access token expired (default: 15 minutes)
+    
+    **Response**: 401 Unauthorized
+    ```json
+    {
+      "status": 401,
+      "message": "Unauthorized"
+    }
+    ```
+    
+    <Note>
+      Clock skew is disabled (`Program.cs:39`), so tokens are rejected immediately upon expiration without grace period.
+    </Note>
+  </Tab>
+  
+  <Tab title="Invalid Signature">
+    **Scenario**: Token signature doesn't match secret key
+    
+    **Response**: 401 Unauthorized
+    
+    <Warning>
+      This indicates:
+      - Token was forged
+      - Wrong secret key is configured
+      - Token is from different environment
+    </Warning>
+  </Tab>
+  
+  <Tab title="Invalid Format">
+    **Scenario**: Malformed JWT (not three base64 parts)
+    
+    **Response**: 401 Unauthorized
+  </Tab>
+</Tabs>
+
+## Logging
+
+### What Gets Logged
+
+The service logs important events at various levels:
+
+**Information** (normal operations):
+- User registrations (`AuthService.cs:62`)
+- Successful logins (`AuthService.cs:109`)
+- Token revocations (`AuthService.cs:169`)
+
+**Warning** (security events):
+- Account lockouts (`AuthService.cs:95`)
+- Token reuse attacks (`AuthService.cs:127`)
+
+**Error** (unexpected failures):
+- Unhandled exceptions (`ExceptionHandlingMiddleware.cs:41`)
+
+### Log Examples
+
+```csharp
+// Successful registration
+_logger.LogInformation("Nuevo usuario registrado: {Email}", user.Email);
+// Output: Nuevo usuario registrado: john@example.com
+
+// Successful login
+_logger.LogInformation("Login exitoso: {Email} desde {Ip}", user.Email, ipAddress);
+// Output: Login exitoso: john@example.com desde 192.168.1.1
+
+// Account lockout
+_logger.LogWarning("Cuenta bloqueada por intentos fallidos: {Email}", user.Email);
+// Output: Cuenta bloqueada por intentos fallidos: attacker@example.com
+
+// Token reuse attack
+_logger.LogWarning(
+    "Posible token reuse attack detectado para usuario {UserId}", storedToken.UserId);
+// Output: Posible token reuse attack detectado para usuario 123e4567-e89b-12d3-a456-426614174000
+
+// Unhandled exception
+_logger.LogError(exception, "Error no controlado");
+// Output: Error no controlado + full stack trace
+```
+
+<Tip>
+  Configure log levels in `appsettings.json` to control verbosity. See [Configuration Guide](/guides/configuration#logging-configuration).
+</Tip>
+
+## Security Considerations
+
+### Error Message Design
+
+<Warning>
+  **Do not leak sensitive information in error messages**
+</Warning>
+
+The service follows security best practices:
+
+<Steps>
+  <Step title="Generic authentication errors">
+    Uses "Credenciales inválidas" for both:
+    - Non-existent email
+    - Wrong password
+    
+    This prevents email enumeration attacks (`AuthService.cs:72-76`).
+  </Step>
+  
+  <Step title="Generic 500 errors">
+    Returns "Ocurrió un error interno" without details:
+    - No stack traces to client
+    - No database error details
+    - No file paths
+    
+    Full details only in server logs (`ExceptionHandlingMiddleware.cs:38, 40-41`).
+  </Step>
+  
+  <Step title="Specific errors only when safe">
+    Provides specific messages when it doesn't help attackers:
+    - "Cuenta bloqueada temporalmente" (unavoidable brute force indication)
+    - "Ya existe una cuenta con ese email" (during registration only)
+    - "Refresh token expirado" (token already submitted by user)
+  </Step>
+</Steps>
+
+### Client IP Logging
+
+The service logs client IP addresses for security monitoring (`AuthController.cs:81-84`):
+
+```csharp
+private string GetClientIp()
+{
+    return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+}
+```
+
+Used for:
+- Login tracking (`AuthService.cs:109`)
+- Token revocation audit trail (`RefreshToken.RevokedByIp`)
+- Attack detection
+
+<Note>
+  If behind a reverse proxy, configure forwarded headers to get real client IP (see [Production Deployment](/guides/production-deployment#3-enable-https)).
+</Note>
+
+## Best Practices
+
+### For API Consumers
+
+<Steps>
+  <Step title="Check HTTP status code first">
+    ```javascript
+    if (response.status === 401) {
+      // Redirect to login
+    } else if (response.status === 409) {
+      // Show "email already exists" error
+    }
+    ```
+  </Step>
+  
+  <Step title="Display user-friendly messages">
+    Parse the `message` field for display:
+    ```javascript
+    const errorData = await response.json();
+    showError(errorData.message);
+    ```
+  </Step>
+  
+  <Step title="Handle token expiration gracefully">
+    When receiving 401 on an authenticated endpoint:
+    1. Try refreshing the access token
+    2. If refresh fails, redirect to login
+    
+    ```javascript
+    if (response.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        // Retry original request
+      } else {
+        // Redirect to login
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Don't retry on 4xx errors">
+    - 4xx errors (except 429 Too Many Requests) indicate client problems
+    - Retrying won't help and wastes resources
+    - Only retry 5xx errors or network failures
+  </Step>
+</Steps>
+
+### For Service Developers
+
+<Steps>
+  <Step title="Use appropriate exception types">
+    Map exceptions to HTTP status codes:
+    
+    ```csharp
+    // 401 Unauthorized
+    throw new UnauthorizedAccessException("Invalid token");
+    
+    // 404 Not Found
+    throw new KeyNotFoundException("User not found");
+    
+    // 409 Conflict
+    throw new InvalidOperationException("Email already exists");
+    
+    // 400 Bad Request
+    throw new ArgumentException("Invalid email format");
+    ```
+  </Step>
+  
+  <Step title="Add custom exception types for complex cases">
+    For scenarios not covered by standard exceptions:
+    
+    ```csharp
+    public class RateLimitExceededException : Exception
+    {
+        public RateLimitExceededException(string message) : base(message) { }
+    }
+    
+    // Update middleware:
+    RateLimitExceededException => (HttpStatusCode.TooManyRequests, exception.Message),
+    ```
+  </Step>
+  
+  <Step title="Log contextual information">
+    Include relevant data in logs:
+    
+    ```csharp
+    _logger.LogWarning(
+        "Failed login attempt for {Email} from {IP}",
+        email, ipAddress);
+    ```
+  </Step>
+  
+  <Step title="Never log sensitive data">
+    Do not log:
+    - Passwords (even hashed)
+    - JWT tokens (can be replayed)
+    - Refresh tokens
+    - Full credit card numbers
+    - SSN or similar identifiers
+  </Step>
+</Steps>
+
+## Extending Error Handling
+
+### Adding Custom Exception Types
+
+To add a new exception mapping:
+
+<Steps>
+  <Step title="Create custom exception">
+    ```csharp
+    public class RateLimitExceededException : Exception
+    {
+        public int RetryAfterSeconds { get; }
+        
+        public RateLimitExceededException(int retryAfter) 
+            : base($"Rate limit exceeded. Retry after {retryAfter} seconds.")
+        {
+            RetryAfterSeconds = retryAfter;
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Update middleware">
+    In `ExceptionHandlingMiddleware.cs:31-38`, add:
+    
+    ```csharp
+    var (statusCode, message) = exception switch
+    {
+        UnauthorizedAccessException => (HttpStatusCode.Unauthorized, exception.Message),
+        InvalidOperationException => (HttpStatusCode.Conflict, exception.Message),
+        KeyNotFoundException => (HttpStatusCode.NotFound, exception.Message),
+        ArgumentException => (HttpStatusCode.BadRequest, exception.Message),
+        RateLimitExceededException => (HttpStatusCode.TooManyRequests, exception.Message),
+        _ => (HttpStatusCode.InternalServerError, "Ocurrió un error interno.")
+    };
+    ```
+  </Step>
+  
+  <Step title="Add custom headers (optional)">
+    For rate limiting, add `Retry-After` header:
+    
+    ```csharp
+    if (exception is RateLimitExceededException rateLimitEx)
+    {
+        context.Response.Headers.Add("Retry-After", rateLimitEx.RetryAfterSeconds.ToString());
+    }
+    ```
+  </Step>
+  
+  <Step title="Use in service code">
+    ```csharp
+    if (IsRateLimited(ipAddress))
+    {
+        throw new RateLimitExceededException(retryAfter: 60);
+    }
+    ```
+  </Step>
+</Steps>
+
+### Adding Error Details for Development
+
+To include stack traces in development:
+
+```csharp
+private async Task HandleExceptionAsync(HttpContext context, Exception exception)
+{
+    var (statusCode, message) = MapException(exception);
+    
+    if (statusCode == HttpStatusCode.InternalServerError)
+        _logger.LogError(exception, "Error no controlado");
+    
+    context.Response.StatusCode = (int)statusCode;
+    context.Response.ContentType = "application/json";
+    
+    var response = new
+    {
+        status = (int)statusCode,
+        message,
+        timestamp = DateTime.UtcNow,
+        // Add in development only
+        stackTrace = context.RequestServices
+            .GetRequiredService<IWebHostEnvironment>()
+            .IsDevelopment() ? exception.StackTrace : null
+    };
+    
+    await context.Response.WriteAsync(JsonSerializer.Serialize(response, /* ... */));
+}
+```
+
+<Warning>
+  Never expose stack traces in production. They reveal internal implementation details and can aid attackers.
+</Warning>
+
+## Related Topics
+
+- [API Reference](/api/register) - Detailed endpoint error responses
+- [Configuration](/guides/configuration) - Logging configuration
+- [Production Deployment](/guides/production-deployment) - Monitoring and alerting for errors

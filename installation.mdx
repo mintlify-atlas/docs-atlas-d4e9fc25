@@ -1,0 +1,487 @@
+---
+title: Installation
+description: Complete guide to installing and running AuthService on your local machine
+---
+
+This guide covers everything you need to install, configure, and verify AuthService is running correctly.
+
+## System Requirements
+
+Before installing AuthService, ensure your system meets these requirements:
+
+### Required
+
+<CardGroup cols={2}>
+  <Card title=".NET 8 SDK" icon="code">
+    Version 8.0 or higher required for running the service
+    
+    [Download .NET 8 SDK →](https://dotnet.microsoft.com/download/dotnet/8.0)
+  </Card>
+  
+  <Card title="Git" icon="code-branch">
+    For cloning the repository and version control
+    
+    [Download Git →](https://git-scm.com/downloads)
+  </Card>
+</CardGroup>
+
+### Optional
+
+<CardGroup cols={2}>
+  <Card title="IDE" icon="laptop-code">
+    Visual Studio 2022, VS Code, or Rider recommended
+  </Card>
+  
+  <Card title="API Client" icon="paper-plane">
+    Postman, Insomnia, or curl for testing endpoints
+  </Card>
+</CardGroup>
+
+## Verify Prerequisites
+
+Check that you have the correct versions installed:
+
+<Steps>
+  <Step title="Verify .NET SDK">
+    ```bash
+    dotnet --version
+    ```
+    
+    Expected output:
+    ```
+    8.0.x
+    ```
+    
+    <Note>
+      If you see a version lower than 8.0, download and install the latest .NET 8 SDK from the official website.
+    </Note>
+  </Step>
+  
+  <Step title="Verify Git">
+    ```bash
+    git --version
+    ```
+    
+    Expected output:
+    ```
+    git version 2.x.x
+    ```
+  </Step>
+</Steps>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Clone the Repository">
+    Clone the AuthService repository to your local machine:
+
+    ```bash
+    git clone https://github.com/David-Andino/auth-service-dotnet.git
+    cd auth-service-dotnet/AuthService
+    ```
+
+    <Tip>
+      Want to use SSH? Use `git clone git@github.com:David-Andino/auth-service-dotnet.git` instead.
+    </Tip>
+  </Step>
+
+  <Step title="Restore Dependencies">
+    The project uses NuGet packages that need to be restored:
+
+    ```bash
+    dotnet restore
+    ```
+
+    This will download:
+    - **Microsoft.AspNetCore.Authentication.JwtBearer** (8.0.0) - JWT authentication
+    - **Microsoft.EntityFrameworkCore.Sqlite** (8.0.0) - Database provider
+    - **Microsoft.EntityFrameworkCore.Design** (8.0.0) - EF Core tooling
+    - **Swashbuckle.AspNetCore** (6.5.0) - API documentation
+
+    Expected output:
+    ```
+    Restore succeeded.
+    ```
+  </Step>
+
+  <Step title="Review Configuration (Optional)">
+    The service comes with sensible defaults in `appsettings.json`. You can review or modify:
+
+    ```json appsettings.json
+    {
+      "ConnectionStrings": {
+        "DefaultConnection": "Data Source=authservice.db"
+      },
+      "Jwt": {
+        "SecretKey": "CAMBIA-ESTO-EN-PRODUCCION-usa-un-valor-largo-y-aleatorio-min32chars",
+        "Issuer": "AuthService",
+        "Audience": "AuthService.Clients",
+        "AccessTokenExpiryMinutes": "15",
+        "RefreshTokenExpiryDays": "7"
+      }
+    }
+    ```
+
+    <Warning>
+      **For development only!** The default JWT SecretKey is fine for local testing, but you MUST change it before deploying to production. See [Production Configuration](/guides/production-deployment) for details.
+    </Warning>
+
+    <Note>
+      The SQLite database file `authservice.db` will be created automatically in the project root when you first run the service.
+    </Note>
+  </Step>
+
+  <Step title="Build the Project">
+    Compile the application to verify everything is configured correctly:
+
+    ```bash
+    dotnet build
+    ```
+
+    Expected output:
+    ```
+    Build succeeded.
+        0 Warning(s)
+        0 Error(s)
+    ```
+
+    <Tip>
+      If you encounter build errors, make sure you're in the correct directory (`auth-service-dotnet/AuthService`) and have .NET 8 SDK installed.
+    </Tip>
+  </Step>
+
+  <Step title="Run the Service">
+    Start the AuthService API:
+
+    ```bash
+    dotnet run
+    ```
+
+    You should see output similar to:
+    ```
+    info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+          Executed DbCommand (0ms) [Parameters=[], CommandType='Text']
+          CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory" ...
+    info: Microsoft.Hosting.Lifetime[14]
+          Now listening on: http://localhost:5000
+    info: Microsoft.Hosting.Lifetime[0]
+          Application started. Press Ctrl+C to shut down.
+    info: Microsoft.Hosting.Lifetime[0]
+          Hosting environment: Development
+    ```
+
+    <Note>
+      On first run, you'll see Entity Framework Core create the database schema automatically. This is expected behavior in development mode.
+    </Note>
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Confirm that AuthService is running correctly:
+
+<Steps>
+  <Step title="Access Swagger UI">
+    Open your web browser and navigate to:
+
+    ```
+    http://localhost:5000
+    ```
+
+    You should see the **Swagger UI** interface with the following endpoints:
+
+    - `POST /api/auth/register` - Register a new user
+    - `POST /api/auth/login` - Login with credentials
+    - `POST /api/auth/refresh` - Refresh access token
+    - `POST /api/auth/revoke` - Revoke refresh token (logout)
+    - `GET /api/auth/me` - Get current user info
+
+    <Tip>
+      Swagger UI provides interactive documentation where you can test endpoints directly in your browser!
+    </Tip>
+  </Step>
+
+  <Step title="Test the Health of the API">
+    Make a test request to register a user:
+
+    ```bash
+    curl -X POST http://localhost:5000/api/auth/register \
+      -H "Content-Type: application/json" \
+      -d '{
+        "username": "test_user",
+        "email": "test@example.com",
+        "password": "TestPass123!"
+      }'
+    ```
+
+    **Expected Response (201 Created):**
+    ```json
+    {
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "refreshToken": "8f3ZHk9mN2pQr5tVwXyZ1aB4cD6eF8gH...",
+      "accessTokenExpiry": "2026-03-10T05:15:00Z",
+      "user": {
+        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        "username": "test_user",
+        "email": "test@example.com",
+        "createdAt": "2026-03-10T05:00:00Z"
+      }
+    }
+    ```
+
+    If you receive this response, your installation is successful!
+  </Step>
+
+  <Step title="Verify Database Creation">
+    Check that the SQLite database was created:
+
+    ```bash
+    ls -la authservice.db
+    ```
+
+    You should see the database file:
+    ```
+    -rw-r--r--  1 user  group  20480 Mar 10 05:00 authservice.db
+    ```
+
+    <Note>
+      The database file is created in the same directory where you run `dotnet run`. For production, you'll want to use a more robust database like PostgreSQL or SQL Server.
+    </Note>
+  </Step>
+</Steps>
+
+## Project Structure
+
+Understand how the AuthService project is organized:
+
+```
+AuthService/
+├── Controllers/
+│   └── AuthController.cs          # API endpoints (register, login, refresh, etc.)
+├── Services/
+│   ├── AuthService.cs             # Core authentication logic
+│   ├── TokenService.cs            # JWT and refresh token generation
+│   └── PasswordService.cs         # PBKDF2 password hashing
+├── Entities/
+│   ├── User.cs                    # User entity model
+│   └── RefreshToken.cs            # Refresh token entity with revocation tracking
+├── DTOs/
+│   └── AuthDTOs.cs                # Request/Response data transfer objects
+├── Data/
+│   └── AppDbContext.cs            # Entity Framework Core database context
+├── Middleware/
+│   └── ExceptionHandlingMiddleware.cs  # Global error handling
+├── Program.cs                     # Application entry point and configuration
+├── appsettings.json               # Configuration settings
+├── appsettings.Development.json   # Development-specific settings
+└── AuthService.csproj             # Project file with dependencies
+```
+
+## Configuration Options
+
+The service can be configured through `appsettings.json`:
+
+### Database Connection
+
+```json
+"ConnectionStrings": {
+  "DefaultConnection": "Data Source=authservice.db"
+}
+```
+
+- **Development:** Uses SQLite (file-based, no setup required)
+- **Production:** Change to PostgreSQL, SQL Server, or MySQL connection string
+
+### JWT Configuration
+
+```json
+"Jwt": {
+  "SecretKey": "your-secret-key-here",
+  "Issuer": "AuthService",
+  "Audience": "AuthService.Clients",
+  "AccessTokenExpiryMinutes": "15",
+  "RefreshTokenExpiryDays": "7"
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `SecretKey` | Sample key | **MUST change in production!** Minimum 32 characters |
+| `Issuer` | AuthService | JWT issuer claim |
+| `Audience` | AuthService.Clients | JWT audience claim |
+| `AccessTokenExpiryMinutes` | 15 | Short-lived access token lifetime |
+| `RefreshTokenExpiryDays` | 7 | Long-lived refresh token lifetime |
+
+<Warning>
+  **Security Critical:** The `SecretKey` is used to sign JWT tokens. If compromised, attackers can forge valid tokens. Always use a cryptographically random key in production and store it securely (Azure Key Vault, AWS Secrets Manager, etc.).
+</Warning>
+
+## Development Tools
+
+### Using Postman
+
+A Postman collection is included in the repository:
+
+1. **Import the collection:**
+   ```
+   File → Import → AuthService.postman_collection.json
+   ```
+
+2. **Set the base URL variable:**
+   - `baseUrl`: `http://localhost:5000`
+
+3. **Run requests:** The collection automatically saves tokens after login/register
+
+### Using the .NET CLI
+
+Useful commands for development:
+
+<CodeGroup>
+
+```bash Run in watch mode
+# Auto-restart on file changes
+dotnet watch run
+```
+
+```bash Build for production
+# Optimized release build
+dotnet build -c Release
+```
+
+```bash Publish for deployment
+# Create deployment package
+dotnet publish -c Release -o ./publish
+```
+
+```bash Run tests (if present)
+dotnet test
+```
+
+</CodeGroup>
+
+## Running on a Different Port
+
+To run the service on a different port, use the `--urls` argument:
+
+```bash
+dotnet run --urls "http://localhost:8080"
+```
+
+Or configure it in `appsettings.Development.json`:
+
+```json
+{
+  "Kestrel": {
+    "Endpoints": {
+      "Http": {
+        "Url": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+<Card title="Port 5000 already in use" icon="triangle-exclamation">
+  **Error:** `Failed to bind to address http://127.0.0.1:5000`
+  
+  **Solution:** 
+  - Kill the process using port 5000: `lsof -ti:5000 | xargs kill -9` (macOS/Linux)
+  - Or run on a different port: `dotnet run --urls "http://localhost:5001"`
+</Card>
+
+<Card title="Database locked error" icon="lock">
+  **Error:** `SQLite Error 5: 'database is locked'`
+  
+  **Solution:** 
+  - Stop all running instances of the service
+  - Delete `authservice.db` and restart
+  - For production, use a proper database server
+</Card>
+
+<Card title="JWT SecretKey error" icon="key">
+  **Error:** `InvalidOperationException: JWT SecretKey not configured`
+  
+  **Solution:** 
+  - Ensure `appsettings.json` has a valid `Jwt:SecretKey` value
+  - The key must be at least 32 characters for security
+</Card>
+
+<Card title="401 Unauthorized on protected endpoints" icon="shield-halved">
+  **Error:** Protected endpoints return 401 even with a token
+  
+  **Solution:** 
+  - Verify the token format: `Authorization: Bearer {token}`
+  - Check token hasn't expired (15-minute lifetime)
+  - Ensure there's a space between "Bearer" and the token
+</Card>
+
+## Environment Variables
+
+Override configuration using environment variables:
+
+<CodeGroup>
+
+```bash Unix/Linux/macOS
+export Jwt__SecretKey="your-production-secret-key-here"
+export ConnectionStrings__DefaultConnection="Server=..."
+dotnet run
+```
+
+```powershell Windows PowerShell
+$env:Jwt__SecretKey="your-production-secret-key-here"
+$env:ConnectionStrings__DefaultConnection="Server=..."
+dotnet run
+```
+
+```cmd Windows Command Prompt
+set Jwt__SecretKey=your-production-secret-key-here
+set ConnectionStrings__DefaultConnection=Server=...
+dotnet run
+```
+
+</CodeGroup>
+
+<Note>
+  Use double underscores (`__`) to represent nested configuration keys in environment variables.
+</Note>
+
+## Next Steps
+
+Now that AuthService is installed and running:
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Follow our step-by-step guide to make your first authenticated request
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/api/register">
+    Explore all available endpoints and their parameters
+  </Card>
+  
+  <Card title="Authentication Flow" icon="diagram-project" href="/concepts/authentication-flow">
+    Understand how JWT and refresh tokens work together
+  </Card>
+  
+  <Card title="Production Checklist" icon="list-check" href="/guides/production-deployment">
+    Prepare your service for production deployment
+  </Card>
+</CardGroup>
+
+## Development vs Production
+
+Key differences between development and production modes:
+
+| Feature | Development | Production |
+|---------|-------------|------------|
+| **Database** | SQLite (auto-created) | PostgreSQL/SQL Server |
+| **Swagger UI** | Enabled at root (`/`) | Disabled |
+| **HTTPS** | Optional | Required |
+| **Secret Key** | Default sample key | Secure vault (Key Vault, Secrets Manager) |
+| **Logging** | Verbose | Warnings/Errors only |
+| **CORS** | Permissive | Restricted to specific origins |
+
+<Warning>
+  Never deploy to production with the default configuration. See the [Production Checklist](/guides/production-deployment) for a complete guide.
+</Warning>
